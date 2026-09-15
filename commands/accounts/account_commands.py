@@ -1,0 +1,293 @@
+"""`/pulsenotify account-add|account-remove|account-list` — Phase 4's
+account-registration commands.
+
+Flattened as direct subcommands of the shared pulsenotify_group rather
+than nested under their own "account" subcommand group: Discord doesn't
+allow mixing plain subcommands and subcommand groups as siblings under
+the same parent, and `/pulsenotify toggle`/`status` are plain subcommands
+— so these are too, for consistency and to avoid that conflict.
+
+Platform-agnostic by design (section 52) — the `platform` choice list is
+the only thing that grows as later phases add adapters; everything else
+(validation, duplicate prevention, channel linking, default alert config)
+already works for any PlatformAdapter.
+"""
+
+from __future__ import annotations
+
+import uuid as uuid_lib
+from typing import List, Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from commands.pulsenotify_group import pulsenotify_group
+from config import constants
+from events.models import EventType, NormalizedEvent
+from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, render_custom_message
+from platforms.base import event_types_for_capabilities
+from utils.errors import PermanentPlatformError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Grows by one Choice per phase as each platform adapter is registered
+# (Phase 5: Twitch, Phase 6: Kick, ...) — nothing else about these
+# commands needs to change when that happens.
+_PLATFORM_CHOICES = [app_commands.Choice(name="YouTube", value="youtube")]
+
+_STATUS_ICONS = {"active": "🟢", "invalid": "🔴", "error": "🟡"}
+
+_EVENT_TYPE_CHOICES = [
+    app_commands.Choice(name="New Video", value=EventType.VIDEO_PUBLISHED.value),
+    app_commands.Choice(name="New Short", value=EventType.SHORT_PUBLISHED.value),
+    app_commands.Choice(name="New Post", value=EventType.POST_CREATED.value),
+    app_commands.Choice(name="Live Started", value=EventType.STREAM_STARTED.value),
+    app_commands.Choice(name="Live Ended", value=EventType.STREAM_ENDED.value),
+    app_commands.Choice(name="Stream Updated", value=EventType.STREAM_UPDATED.value),
+    app_commands.Choice(name="Account Updated", value=EventType.ACCOUNT_UPDATED.value),
+]
+
+_CLEAR_KEYWORDS = {"clear", "reset", "default"}
+
+_NOT_A_VALID_ACCOUNT_MESSAGE = (
+    "That's not a valid account selection. Start typing and pick one of the suggestions Discord "
+    "shows you — typing a name and submitting it directly (without picking a suggestion) doesn't work."
+)
+
+
+def _is_valid_account_id(value: str) -> bool:
+    # account_id is a database uuid; the autocomplete below submits
+    # row["id"] as the Choice *value*, but Discord's autocomplete is only
+    # a suggestion for a plain string parameter — nothing stops someone
+    # from typing free text (e.g. the suggestion's display label) and
+    # submitting that instead. Catching it here turns what would
+    # otherwise be a raw Postgres "invalid input syntax for type uuid"
+    # error into a clear, actionable message.
+    try:
+        uuid_lib.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+async def _account_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    if interaction.guild is None:
+        return []
+    accounts = await interaction.client.accounts_repo.list_by_guild(interaction.guild.id)  # type: ignore[attr-defined]
+    current_lower = current.lower()
+    matches = [
+        row
+        for row in accounts
+        if current_lower in row["username"].lower() or current_lower in row["platform"].lower()
+    ]
+    return [
+        app_commands.Choice(name=f"{row['platform'].title()}: {row['username']}", value=row["id"])
+        for row in matches[:25]  # Discord caps autocomplete results at 25
+    ]
+
+
+@pulsenotify_group.command(
+    name="account-add", description="Start monitoring a platform account and post alerts to a channel."
+)
+@app_commands.describe(
+    platform="Which platform to monitor",
+    identifier="Channel ID, @handle, or channel URL",
+    channel="Discord channel to post alerts in",
+)
+@app_commands.choices(platform=_PLATFORM_CHOICES)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def account_add(
+    interaction: discord.Interaction,
+    platform: app_commands.Choice[str],
+    identifier: str,
+    channel: discord.TextChannel,
+) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    identifier = identifier.strip()
+    if not identifier:
+        await interaction.response.send_message("Please provide a channel ID, handle, or URL.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    adapter = bot.monitoring.get_adapter(platform.value)  # type: ignore[attr-defined]
+    if adapter is None:
+        await interaction.followup.send(
+            f"{platform.name} isn't available right now (no API credentials configured for it)."
+        )
+        return
+
+    try:
+        account_ref = await adapter.validate_account(identifier)
+    except PermanentPlatformError as exc:
+        await interaction.followup.send(f"Couldn't find that {platform.name} account: {exc}")
+        return
+    except Exception:
+        logger.exception("Error validating %s account %r for guild %s", platform.value, identifier, interaction.guild.id)
+        await interaction.followup.send(f"Couldn't reach {platform.name} right now — try again in a moment.")
+        return
+
+    account_row = await bot.accounts_repo.add(  # type: ignore[attr-defined]
+        interaction.guild.id, platform.value, account_ref.platform_account_id, account_ref.username
+    )
+    if account_row is None:
+        await interaction.followup.send(f"**{account_ref.username}** is already being monitored in this server.")
+        return
+
+    channel_row = await bot.channels_repo.get_or_create(  # type: ignore[attr-defined]
+        interaction.guild.id, channel.id, name=channel.name
+    )
+    await bot.channels_repo.link_account(interaction.guild.id, account_row["id"], channel_row["id"])  # type: ignore[attr-defined]
+
+    event_types = event_types_for_capabilities(adapter.capabilities)
+    await bot.alert_configs_repo.seed_defaults(  # type: ignore[attr-defined]
+        interaction.guild.id, account_row["id"], [t.value for t in event_types]
+    )
+
+    logger.info(
+        "Guild %s added %s account %s (%s), alerts -> #%s",
+        interaction.guild.id,
+        platform.value,
+        account_ref.username,
+        account_row["id"],
+        channel.name,
+    )
+    await interaction.followup.send(
+        f"✅ Now monitoring **{account_ref.username}** on {platform.name} — alerts will post in {channel.mention}."
+    )
+
+
+@pulsenotify_group.command(name="account-remove", description="Stop monitoring an account.")
+@app_commands.describe(account="The account to stop monitoring")
+@app_commands.autocomplete(account=_account_autocomplete)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def account_remove(interaction: discord.Interaction, account: str) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    if not _is_valid_account_id(account):
+        await interaction.response.send_message(_NOT_A_VALID_ACCOUNT_MESSAGE, ephemeral=True)
+        return
+
+    row = await bot.accounts_repo.get_by_guild(interaction.guild.id, account)  # type: ignore[attr-defined]
+    if row is None:
+        await interaction.response.send_message("That account isn't configured in this server.", ephemeral=True)
+        return
+
+    await bot.accounts_repo.remove(interaction.guild.id, account)  # type: ignore[attr-defined]
+    logger.info(
+        "Guild %s removed %s account %s (%s)", interaction.guild.id, row["platform"], row["username"], account
+    )
+    await interaction.response.send_message(f"🗑️ Stopped monitoring **{row['username']}** ({row['platform'].title()}).")
+
+
+@pulsenotify_group.command(name="account-list", description="List accounts being monitored in this server.")
+async def account_list(interaction: discord.Interaction) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    accounts = await bot.accounts_repo.list_by_guild(interaction.guild.id)  # type: ignore[attr-defined]
+    if not accounts:
+        await interaction.response.send_message(
+            "No accounts are being monitored in this server yet. Use `/pulsenotify account-add` to add one.",
+            ephemeral=True,
+        )
+        return
+
+    lines = []
+    for row in accounts:
+        icon = _STATUS_ICONS.get(row["status"], "⚪")
+        suffix = "" if row["enabled"] else " *(disabled)*"
+        lines.append(f"{icon} **{row['username']}** — {row['platform'].title()}{suffix}")
+
+    embed = discord.Embed(
+        title="Monitored Accounts", description="\n".join(lines), color=discord.Color(constants.COLOR_INFO)
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@pulsenotify_group.command(
+    name="account-set-message",
+    description="Set a custom notification message for an account (or 'clear' to use the default).",
+)
+@app_commands.describe(
+    account="The account to customize",
+    message=(
+        "Your message. Placeholders: " + ", ".join(f"{{{p}}}" for p in PLACEHOLDERS) + ". Type 'clear' to remove."
+    ),
+    event_type="Only apply to this event type (optional — applies to every event type this account currently has configured)",
+)
+@app_commands.autocomplete(account=_account_autocomplete)
+@app_commands.choices(event_type=_EVENT_TYPE_CHOICES)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def account_set_message(
+    interaction: discord.Interaction,
+    account: str,
+    message: str,
+    event_type: Optional[app_commands.Choice[str]] = None,
+) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    if not _is_valid_account_id(account):
+        await interaction.response.send_message(_NOT_A_VALID_ACCOUNT_MESSAGE, ephemeral=True)
+        return
+
+    row = await bot.accounts_repo.get_by_guild(interaction.guild.id, account)  # type: ignore[attr-defined]
+    if row is None:
+        await interaction.response.send_message("That account isn't configured in this server.", ephemeral=True)
+        return
+
+    clearing = message.strip().lower() in _CLEAR_KEYWORDS
+    if not clearing and len(message) > MAX_TEMPLATE_LENGTH:
+        await interaction.response.send_message(
+            f"That message is too long ({len(message)} characters, max {MAX_TEMPLATE_LENGTH}).", ephemeral=True
+        )
+        return
+
+    updated = await bot.alert_configs_repo.set_custom_message(  # type: ignore[attr-defined]
+        account,
+        None if clearing else message,
+        event_type=event_type.value if event_type else None,
+    )
+    if updated == 0:
+        scope = f" for the **{event_type.name}** alert type" if event_type else ""
+        await interaction.response.send_message(
+            f"**{row['username']}** doesn't have an alert configuration{scope} yet.", ephemeral=True
+        )
+        return
+
+    scope = f"for **{event_type.name}**" if event_type else "for all its currently configured alert types"
+    logger.info(
+        "Guild %s %s custom message for account %s (%s) %s",
+        interaction.guild.id,
+        "cleared" if clearing else "set",
+        row["username"],
+        account,
+        scope,
+    )
+
+    if clearing:
+        await interaction.response.send_message(f"🧹 Cleared the custom message for **{row['username']}** {scope}.")
+        return
+
+    preview = render_custom_message(
+        message,
+        NormalizedEvent(
+            platform=row["platform"],
+            platform_account_id=row["platform_account_id"],
+            account_username=row["username"],
+            event_type=EventType(event_type.value) if event_type else EventType.VIDEO_PUBLISHED,
+            platform_event_id="preview",
+            title="Example Title",
+            url="https://example.com/preview-link",
+        ),
+    )
+    await interaction.response.send_message(
+        f"✅ Custom message set for **{row['username']}** {scope}.\n\n**Preview:**\n{preview}"
+    )
+
+
+async def setup(bot: commands.Bot) -> None:
+    """No Cog needed — these attach to the shared pulsenotify_group at
+    import time (the decorators above)."""

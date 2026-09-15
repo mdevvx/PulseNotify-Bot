@@ -1,0 +1,10 @@
+discord.py>=2.4.0
+# 2.16.0+ specifically: earlier versions reject Supabase's newer
+# sb_secret_.../sb_publishable_... API keys with "Invalid API key" (they
+# validate against a JWT-shaped regex that only matches the legacy
+# anon/service_role key format).
+supabase>=2.16.0
+pydantic>=2.7.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
