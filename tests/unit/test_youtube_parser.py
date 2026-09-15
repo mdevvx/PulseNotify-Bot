@@ -177,6 +177,24 @@ def test_duration_returns_none_for_unparseable_value() -> None:
 # ── uploads playlist / account ref ────────────────────────────────────────
 
 
+# ── is_live_broadcast ──────────────────────────────────────────────────
+
+
+def test_is_live_broadcast_true_when_live_streaming_details_present() -> None:
+    video = {"id": "vid-1", "liveStreamingDetails": {"actualStartTime": "2026-09-15T10:00:00Z"}}
+    assert parser.is_live_broadcast(video) is True
+
+
+def test_is_live_broadcast_false_for_a_regular_video() -> None:
+    video = {"id": "vid-1", "snippet": {}, "contentDetails": {"duration": "PT10M0S"}}
+    assert parser.is_live_broadcast(video) is False
+
+
+def test_is_live_broadcast_false_when_live_streaming_details_is_empty() -> None:
+    video = {"id": "vid-1", "liveStreamingDetails": {}}
+    assert parser.is_live_broadcast(video) is False
+
+
 def test_uploads_playlist_id_extracts_the_nested_field() -> None:
     channel = {"contentDetails": {"relatedPlaylists": {"uploads": "UUabc"}}}
     assert parser.uploads_playlist_id(channel) == "UUabc"

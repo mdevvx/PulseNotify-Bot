@@ -99,6 +99,30 @@ async def test_no_new_items_returns_empty_and_keeps_the_cursor_fresh() -> None:
     assert result.next_cursor == "vid-1"
 
 
+async def test_fetch_updates_excludes_livestreams_from_new_video_results() -> None:
+    """A stream going live (or one that already ended) shows up in the
+    uploads playlist exactly like a regular upload — must never be
+    reported as a 'new video' (that's get_live_status()'s job), or it
+    fires the wrong notification template. Regression test for a real
+    production bug: a livestream was announced as 'New Video' instead of
+    'Live Started'."""
+    client = FakeYouTubeClient()
+    client.uploads = [_playlist_item("live-1"), _playlist_item("vid-1")]
+    live_video = {
+        "id": "live-1",
+        "snippet": {"title": "live-1", "liveBroadcastContent": "live"},
+        "contentDetails": {},
+        "liveStreamingDetails": {"actualStartTime": "2026-09-15T10:00:00Z"},
+    }
+    client.videos_by_id = {"live-1": live_video, "vid-1": _video("vid-1")}
+    adapter = _make_adapter(client)
+
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-0")
+
+    assert {v["id"] for v in result.items} == {"vid-1"}
+    assert result.next_cursor == "live-1"  # cursor still advances past the excluded item
+
+
 async def test_missing_channel_raises_permanent_error() -> None:
     from utils.errors import PermanentPlatformError
 

@@ -65,6 +65,20 @@ def playlist_item_video_id(item: Dict[str, Any]) -> str:
     return item["snippet"]["resourceId"]["videoId"]
 
 
+def is_live_broadcast(video: Dict[str, Any]) -> bool:
+    """A livestream (upcoming, currently live, or already ended) shows up
+    in the channel's uploads playlist exactly like a regular upload — the
+    only reliable, permanent signal that a video ID is/was a broadcast
+    rather than a normal upload is the presence of `liveStreamingDetails`
+    on the videos.list resource (unlike `snippet.liveBroadcastContent`,
+    which reverts to "none" once the stream ends). fetch_updates() uses
+    this to exclude broadcasts from "new video" detection entirely —
+    live-transition alerts are get_live_status()'s job; without this
+    exclusion, a stream going live (or ending) gets double-reported as a
+    "new video" too, using the wrong notification template."""
+    return bool(video.get("liveStreamingDetails"))
+
+
 def normalize_video(account: AccountRef, video: Dict[str, Any]) -> NormalizedEvent:
     """`video` is a videos.list resource (part=snippet,contentDetails)."""
     snippet = video.get("snippet", {})

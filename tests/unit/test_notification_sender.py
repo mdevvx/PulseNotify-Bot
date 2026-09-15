@@ -27,10 +27,12 @@ class FakeDiscordChannel:
         self.raise_on_send = raise_on_send
         self.sent: List[Dict[str, Any]] = []
 
-    async def send(self, *, content=None, embed=None, allowed_mentions=None):
+    async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False):
         if self.raise_on_send:
             raise self.raise_on_send
-        self.sent.append({"content": content, "embed": embed, "allowed_mentions": allowed_mentions})
+        self.sent.append(
+            {"content": content, "embed": embed, "allowed_mentions": allowed_mentions, "suppress_embeds": suppress_embeds}
+        )
 
 
 class FakeBot:
@@ -156,17 +158,35 @@ async def test_custom_message_replaces_the_default_content(harness: Harness) -> 
     )
 
 
-async def test_custom_message_with_embeds_enabled_sends_both(harness: Harness) -> None:
+async def test_custom_message_never_gets_a_manually_built_embed(harness: Harness) -> None:
+    """A custom message's template typically already includes {url} as
+    plain text, which Discord auto-previews on its own — a hand-built
+    embed on top of that would just duplicate it, so custom messages never
+    get one regardless of embed_enabled (section 35 revision)."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!"
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = True
 
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["content"] == "Check this out!"
-    assert sent["embed"] is not None
+    assert sent["content"] == "Check this out!\nhttps://youtube.com/watch?v=vid-1"
+    assert sent["embed"] is None
+    assert sent["suppress_embeds"] is False  # embed_enabled=True -> allow Discord's own link preview
+
+
+async def test_custom_message_with_embed_disabled_suppresses_the_native_link_preview(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+
+    await harness.sender.handle(_event())
+
+    sent = channel.sent[0]
+    assert sent["embed"] is None
+    assert sent["suppress_embeds"] is True
 
 
 async def test_custom_messages_literal_everyone_actually_allows_the_mention(harness: Harness) -> None:

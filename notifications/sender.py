@@ -57,13 +57,19 @@ class NotificationSender:
         embed_enabled = config["embed_enabled"] if config else True
         mention_role_id = config["mention_role_id"] if config else None
         custom_message = config["custom_message"] if config else None
-        content, embed = self._build_message(
+        content, embed, suppress_embeds = self._build_message(
             event, embed_enabled=embed_enabled, mention_role_id=mention_role_id, custom_message=custom_message
         )
         allowed_mentions = self._allowed_mentions_for(content, mention_role_id)
 
         for channel_row in channels:
-            await self._send_to_channel(channel_row, content=content, embed=embed, allowed_mentions=allowed_mentions)
+            await self._send_to_channel(
+                channel_row,
+                content=content,
+                embed=embed,
+                allowed_mentions=allowed_mentions,
+                suppress_embeds=suppress_embeds,
+            )
 
     def _build_message(
         self,
@@ -74,21 +80,23 @@ class NotificationSender:
         custom_message: Optional[str],
     ) -> tuple:
         if custom_message:
-            # The admin's own template replaces the auto-generated text
-            # entirely; embed_enabled still independently controls whether
-            # the structured embed accompanies it.
+            # Never attach a manually-built embed alongside a custom
+            # message — the admin's template typically already includes
+            # {url} as plain text, and Discord auto-generates its own
+            # preview from that raw link, so a hand-built embed on top
+            # just duplicates it. embed_enabled instead controls whether
+            # that native preview is allowed to show at all.
             content = render_custom_message(custom_message, event, mention_role_id=mention_role_id)
-            embed = build_embed(event) if embed_enabled else None
-            return content, embed
+            return content, None, not embed_enabled
 
         mention_text = f"<@&{mention_role_id}>" if mention_role_id else None
 
         if embed_enabled:
-            return mention_text, build_embed(event)
+            return mention_text, build_embed(event), False
 
         fallback = build_plain_text(event)
         content = f"{mention_text}\n{fallback}" if mention_text else fallback
-        return content, None
+        return content, None, False
 
     def _allowed_mentions_for(self, content: Optional[str], mention_role_id: Optional[int]) -> discord.AllowedMentions:
         text = content or ""
@@ -109,6 +117,7 @@ class NotificationSender:
         content: Optional[str],
         embed: Optional[discord.Embed],
         allowed_mentions: discord.AllowedMentions,
+        suppress_embeds: bool = False,
     ) -> None:
         discord_channel_id = channel_row["channel_id"]
         discord_channel = self._bot.get_channel(discord_channel_id)
@@ -124,7 +133,9 @@ class NotificationSender:
                 return
 
         try:
-            await discord_channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+            await discord_channel.send(
+                content=content, embed=embed, allowed_mentions=allowed_mentions, suppress_embeds=suppress_embeds
+            )
         except discord.Forbidden:
             await self._mark_invalid(channel_row, "missing permission to send messages")
         except discord.NotFound:

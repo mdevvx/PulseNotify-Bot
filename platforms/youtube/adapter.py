@@ -108,6 +108,11 @@ class YouTubeAdapter(PlatformAdapter):
         video_ids = [parser.playlist_item_video_id(item) for item in reversed(new_items)]
         await self._list_budget.acquire(cost=_LIST_COST)
         videos = await self._client.get_videos(video_ids)
+        # Livestreams (upcoming, live, or already ended) appear in the
+        # uploads playlist too — excluded here so they're never reported
+        # as a "new video"; get_live_status() is the only path that
+        # should ever fire a live-related notification for them.
+        videos = [video for video in videos if not parser.is_live_broadcast(video)]
         return FetchResult(items=videos, next_cursor=newest_video_id)
 
     async def get_live_status(self, account: AccountRef) -> Optional[LiveStatus]:
