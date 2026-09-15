@@ -43,6 +43,12 @@ class FakeWebhook:
             }
         )
 
+    async def fetch(self):
+        self._channel.webhook_fetch_calls += 1
+        if self._channel.raise_on_webhook_fetch:
+            raise self._channel.raise_on_webhook_fetch
+        return self
+
 
 class FakeDiscordChannel:
     def __init__(
@@ -52,13 +58,16 @@ class FakeDiscordChannel:
         raise_on_send: Optional[BaseException] = None,
         raise_on_create_webhook: Optional[BaseException] = None,
         raise_on_webhook_send: Optional[BaseException] = None,
+        raise_on_webhook_fetch: Optional[BaseException] = None,
     ) -> None:
         self.id = channel_id
         self.raise_on_send = raise_on_send
         self.raise_on_create_webhook = raise_on_create_webhook
         self.raise_on_webhook_send = raise_on_webhook_send
+        self.raise_on_webhook_fetch = raise_on_webhook_fetch
         self.sent: List[Dict[str, Any]] = []
         self.create_webhook_calls = 0
+        self.webhook_fetch_calls = 0
 
     async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False):
         if self.raise_on_send:
@@ -408,6 +417,30 @@ async def test_missing_manage_webhooks_permission_falls_back_to_sending_as_the_b
     updated = await harness.channel_repo.get_by_discord_channel(1, 555)
     assert updated is not None
     assert updated["webhook_url"] is None  # never persisted since creation failed
+
+
+async def test_webhook_deleted_externally_before_any_send_is_recreated(harness: Harness) -> None:
+    """Regression test: if a webhook is deleted from Discord's side (by a
+    server admin, or some unrelated automation/integration) before
+    PulseNotify ever tries to actually send through it — e.g. between
+    get_or_create_webhook() being called proactively from account-add and
+    the first real notification — the stale stored URL must not be handed
+    back as if it were still good. Previously get_or_create_webhook()
+    trusted a stored URL unconditionally, so nothing new ever got created
+    once the original webhook was gone."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.sender.get_or_create_webhook(
+        await harness.channel_repo.get_by_discord_channel(1, 555), channel
+    )
+    assert channel.create_webhook_calls == 1
+
+    # Simulate external deletion: the stored URL now points at nothing.
+    channel.raise_on_webhook_fetch = _fake_http_exception(discord.NotFound, status=404)
+
+    await harness.sender.handle(_event())
+
+    assert channel.create_webhook_calls == 2  # a fresh webhook was actually created
+    assert len(channel.sent) == 1  # and the notification still went out through it
 
 
 async def test_deleted_webhook_is_cleared_and_falls_back_for_that_send(harness: Harness) -> None:

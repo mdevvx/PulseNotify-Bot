@@ -195,7 +195,14 @@ class NotificationSender:
         Discord's own UI before any alert ever uses it."""
         webhook_url = channel_row.get("webhook_url")
         if webhook_url:
-            return self._webhook_from_url(webhook_url, client=self._bot)
+            webhook = self._webhook_from_url(webhook_url, client=self._bot)
+            if await self._webhook_still_exists(webhook):
+                return webhook
+            # Deleted from Discord's side (manually, or by some other
+            # automation/integration in the server) since we created it —
+            # forget the stale URL and fall through to create a fresh one,
+            # rather than silently handing back a reference to nothing.
+            await self._channel_repo.set_webhook_url(channel_row["id"], None)
 
         try:
             webhook = await discord_channel.create_webhook(name=constants.BOT_NAME)
@@ -211,6 +218,13 @@ class NotificationSender:
 
         await self._channel_repo.set_webhook_url(channel_row["id"], webhook.url)
         return webhook
+
+    async def _webhook_still_exists(self, webhook: discord.Webhook) -> bool:
+        try:
+            await webhook.fetch()
+            return True
+        except (discord.NotFound, discord.Forbidden):
+            return False
 
     async def _mark_invalid(self, channel_row: Dict[str, Any], reason: str) -> None:
         await self._channel_repo.mark_invalid(channel_row["id"])
