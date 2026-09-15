@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from database.client import Database, is_unique_violation
 from database.models import AlertConfigurationRow
@@ -78,4 +78,52 @@ class AlertConfigurationRepository:
         if event_type is not None:
             query = query.eq("event_type", event_type)
         result = await query.execute()
+        return len(result.data)
+
+    async def set_mention_role(
+        self, account_id: str, mention_role_id: Optional[int], *, event_type: Optional[str] = None
+    ) -> int:
+        """Sets (or, with mention_role_id=None, clears) the role mentioned
+        when this account posts. Applies to every event type currently
+        configured for the account, unless `event_type` narrows it to just
+        one — mirrors set_custom_message()'s shape exactly. Returns how
+        many rows were updated (0 means the account/event_type combination
+        doesn't exist)."""
+        query = self._db.client.table(_TABLE).update({"mention_role_id": mention_role_id}).eq("account_id", account_id)
+        if event_type is not None:
+            query = query.eq("event_type", event_type)
+        result = await query.execute()
+        return len(result.data)
+
+    async def set_alert_toggle(
+        self,
+        account_id: str,
+        event_type: str,
+        *,
+        enabled: Optional[bool] = None,
+        embed_enabled: Optional[bool] = None,
+    ) -> int:
+        """Updates `enabled` and/or `embed_enabled` for one (account,
+        event_type) row — whichever of the two is passed as not-None.
+        Unlike set_custom_message()/set_mention_role(), this always
+        targets exactly one event type (there's no "apply to every event
+        type" mode) since turning an alert on/off is inherently a
+        per-event-type decision, not an account-wide one. Returns how many
+        rows were updated (0 means that account/event_type combination
+        doesn't exist)."""
+        changes: Dict[str, Any] = {}
+        if enabled is not None:
+            changes["enabled"] = enabled
+        if embed_enabled is not None:
+            changes["embed_enabled"] = embed_enabled
+        if not changes:
+            return 0
+
+        result = (
+            await self._db.client.table(_TABLE)
+            .update(changes)
+            .eq("account_id", account_id)
+            .eq("event_type", event_type)
+            .execute()
+        )
         return len(result.data)

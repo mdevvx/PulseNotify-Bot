@@ -2,7 +2,7 @@
 
 A multi-tenant Discord bot that watches social/streaming accounts (YouTube, Twitch, Kick, X/Twitter, Instagram, Facebook, TikTok) and posts alerts to Discord when they post or go live. Every server's configuration — accounts, channels, alert settings, enabled/disabled state — is fully isolated by `guild_id`.
 
-This is being built in phases. **Phases 1–4 are complete.** YouTube is the first working platform end-to-end: `/pulsenotify account-add` registers a channel, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts and live start/end.
+This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially complete, and Phase 8 is partially complete.** YouTube, Twitch, Kick, X/Twitter, and Instagram are all working end-to-end: `/pulsenotify account-add` registers an account, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts (YouTube), new posts (X/Twitter, Instagram), and live start/end (YouTube, Twitch, Kick). Facebook and TikTok have **no adapter** — see the Phase 7 section below for why: neither platform offers an official way to monitor an account that hasn't individually authorized this app. Per-account alert configuration (which event types notify, embeds, role mentions) can now be viewed and changed entirely via slash commands — see the Commands section.
 
 ## Status
 
@@ -12,14 +12,20 @@ This is being built in phases. **Phases 1–4 are complete.** YouTube is the fir
 | 2 | Full database schema (accounts, channels, alert config, events, live state, platform health) | ✅ Done |
 | 3 | Monitoring framework (scheduler, workers, rate limiting, retries, dedup, API usage manager) | ✅ Done — framework only, zero adapters registered |
 | 4 | YouTube adapter, `/pulsenotify account-add\|account-remove\|account-list`, notification embeds + sender | ✅ Done |
-| 5 | Twitch adapter | Not started |
-| 6 | Kick adapter | Not started |
-| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | Not started |
-| 8 | Templates, role mentions, `/pulsenotify alerts` (per-event-type toggles), analytics, admin tooling | Not started |
+| 5 | Twitch adapter (live/offline detection) | ✅ Done |
+| 6 | Kick adapter (live/offline detection) | ✅ Done |
+| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | ⚠️ Partial — X/Twitter and Instagram done (with real caveats, see below); Facebook and TikTok have no official path and were **not built** |
+| 8 | `/pulsenotify alerts` (per-event-type enabled/embed toggles + viewing), `/pulsenotify account-set-mention` (role mentions), `/pulsenotify account-info` (view full config incl. custom message) | ⚠️ Partial — analytics and general admin tooling deliberately **skipped**, at the user's explicit choice (2026-09-15) |
 
 ### Platform API policy (applies to every platform integration)
 
-Before any platform integration is built: verify that platform's *current* official API pricing, quotas, rate limits, auth/approval requirements, and available endpoints — never assume an API is free, and never build against undocumented/scraped endpoints to route around a restriction. Live monitoring should prefer official webhooks/events (e.g. Twitch EventSub) over polling wherever a platform actually offers them — the monitoring framework built in Phase 3 is polling-shaped (`PlatformScheduler` on an interval), so a webhook-based platform will need its own inbound-delivery path (see Monitoring framework below) rather than being forced through `fetch_updates()`. **YouTube's live-stream detection was a deliberate exception, made with the user's explicit sign-off**: there's no cheap official alternative to the 100-quota-unit `search.list` call without a public HTTPS webhook endpoint this project doesn't have yet — see the YouTube adapter section below for the exact tradeoff and how it's budgeted.
+Before any platform integration is built: verify that platform's *current* official API pricing, quotas, rate limits, auth/approval requirements, and available endpoints — never assume an API is free, and never build against undocumented/scraped endpoints to route around a restriction. Live monitoring should prefer official webhooks/events (e.g. Twitch EventSub) over polling wherever a platform actually offers them — the monitoring framework built in Phase 3 is polling-shaped (`PlatformScheduler` on an interval), so a webhook-based platform will need its own inbound-delivery path (see Monitoring framework below) rather than being forced through `fetch_updates()`.
+
+- **YouTube's live-stream detection** was a deliberate exception, made with the user's explicit sign-off: there's no cheap official alternative to the 100-quota-unit `search.list` call without a public HTTPS webhook endpoint this project doesn't have yet — see the YouTube adapter section below for the exact tradeoff and how it's budgeted.
+- **Twitch (Phase 5) and Kick (Phase 6)** were deliberate polling choices too, also with sign-off where the tradeoff was real: EventSub-style webhooks are the "correct" push-based approach for both, but need a public HTTPS endpoint this project doesn't have; Twitch's EventSub WebSocket transport (which would avoid that) turned out to require a *user* access token capped far too low for monitoring arbitrary streamers, so it isn't viable at all. Polling is cheap enough on both platforms' free app-token tiers that there's no quota pressure forcing the webhook infrastructure question the way there was for YouTube.
+- **X/Twitter (Phase 7) has no free tier at all as of 2026** — reading posts is billed pay-per-use with no free allowance. This adapter is built, but enabling it (`TWITTER_BEARER_TOKEN`) is an explicit opt-in to a real, ongoing dollar cost, unlike every other platform here. See the X (Twitter) adapter section below before turning it on.
+- **Instagram (Phase 7)** has no equivalent to Twitch/Kick's "any public account, no consent needed" model. The only officially-supported path that doesn't require the *target* account's cooperation — Business Discovery — only works against Business/Creator accounts (not personal ones), requires the operator's own qualifying Meta app + linked professional account, and requires that app to pass Meta App Review before it can query anyone beyond its own testers. See the Instagram adapter section below.
+- **Facebook and TikTok (Phase 7) have no adapter.** Both platforms' official APIs are built entirely around a creator/Page connecting *their own* account to your app — the opposite of monitoring one you don't control — with no Instagram-Business-Discovery-style exception for either. Facebook's closest equivalent ("Page Public Content Access") requires Meta Business Verification and is scoped to "analyze/display" use cases with no guarantee a notification bot qualifies; TikTok's developer platform has no discovery/monitoring surface at all. Building against either would mean scraping, which the standing policy above explicitly rules out. Revisit if either platform's policy changes.
 
 ## Requirements
 
@@ -45,7 +51,15 @@ Before any platform integration is built: verify that platform's *current* offic
    - `DEV_GUILD_ID` — optional, a guild ID for instant slash-command sync while developing
    - `DISCORD_OWNER_IDS` — optional, extra Discord user IDs allowed to run owner-only commands. The bot's own application owner/team is resolved automatically and doesn't need to be listed here.
 
-   `YOUTUBE_API_KEY` — a plain API key (not OAuth) from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the YouTube Data API v3 enabled on the project. Without it, YouTube monitoring is simply disabled at startup (logged, not fatal) — every other platform key is optional the same way until its adapter is built. `MONITORING_*`/`YOUTUBE_*` tuning variables (polling intervals, retry/backoff, rate limits, health thresholds, quota budgets) are all optional too — sensible defaults are baked in; see `.env.example` for the full list.
+   Every platform's credentials are optional and independent — a missing/incomplete set just disables that one platform at startup (logged, not fatal). See `.env.example` for the full list and setup links; in short:
+   - `YOUTUBE_API_KEY` — a plain API key (not OAuth) from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the YouTube Data API v3 enabled.
+   - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` — from a [Twitch app](https://dev.twitch.tv/console/apps).
+   - `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET` — from a [Kick app](https://kick.com/settings/developer).
+   - `TWITTER_BEARER_TOKEN` — an app-only Bearer token from the [X Developer Portal](https://developer.x.com). **Costs real money to use — no free tier as of 2026** (see the X (Twitter) adapter section below before enabling).
+   - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_BUSINESS_ACCOUNT_ID` — a long-lived token + IG user ID for your *own* linked Instagram professional account, from a [Meta app](https://developers.facebook.com/apps). Requires Meta App Review before it can monitor accounts beyond your own testers, and only works against Business/Creator target accounts (see the Instagram adapter section below).
+   - There's no Facebook or TikTok key to set — neither has an adapter (see the Phase 7 section above).
+
+   `MONITORING_*`/`YOUTUBE_*` tuning variables (polling intervals, retry/backoff, rate limits, health thresholds, quota budgets) are all optional too — sensible defaults are baked in; see `.env.example` for the full list.
 
 3. **Run the database migrations**
 
@@ -88,9 +102,14 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 | `/pulsenotify account-remove account` | Stop monitoring an account (autocompletes from this server's configured accounts) | Manage Server |
 | `/pulsenotify account-list` | List accounts monitored in this server, with status | Anyone |
 | `/pulsenotify account-set-message account message [event_type]` | Set a custom notification message template for an account (or `clear` to remove it); see below | Manage Server |
+| `/pulsenotify account-set-mention account [role] [event_type]` | Set the role to mention when an account posts/goes live (omit `role` to clear it) | Manage Server |
+| `/pulsenotify alerts account event_type [enabled] [embed]` | View an event type's current alert/embed setting (omit both `enabled` and `embed`), or change one/both | Manage Server |
+| `/pulsenotify account-info account` | Show an account's full alert configuration — every event type's enabled/embed/mention state, plus its custom message if one is set | Anyone |
 | `pn!sync [global]` | Sync slash commands to this server, or globally. A text command, not a slash command — if the command tree is out of sync, `/pulsenotify` itself might not be registered yet, so syncing can't depend on it. | Bot owner only |
 
-Per-account alert preferences (which event types notify, mentions, embed on/off) are seeded with sensible defaults when an account is added — new posts/videos/Shorts/live-start on, stream-ended off, matching the spec's own example. There's no `/pulsenotify alerts` command to change the on/off toggles yet (Phase 8); until then, adjusting them means editing the `pulsenotify_alert_configurations` row directly in Supabase. Custom messages *are* settable now, via `account-set-message`.
+Per-account alert preferences (which event types notify, mentions, embed on/off) are seeded with sensible defaults when an account is added — new posts/videos/Shorts/live-start on, stream-ended off, matching the spec's own example. All of them are now viewable and changeable via slash commands (Phase 8): `/pulsenotify alerts` turns an event type's notifications and/or embed on or off (and shows the current setting if you omit both), `/pulsenotify account-set-mention` sets or clears the role pinged for an account, and `/pulsenotify account-info` shows everything for an account at a glance — including the custom message, which previously could only be *set* (`account-set-message`), never viewed back.
+
+Deliberately **not** built in Phase 8, at the user's explicit choice: analytics (event-count/history stats) and general admin tooling (e.g. wiring up `pulsenotify_audit_logs`, which still exists but nothing writes to it). Revisit if wanted later.
 
 ### Custom notification messages
 
@@ -127,10 +146,14 @@ bot/
 commands/
   pulsenotify_group.py   the single shared `/pulsenotify` app_commands.Group every subcommand below attaches to
   admin/                status.py, toggle.py, help.py — decorate against the shared group; sync.py — a real Cog (text command, not a slash command)
-  accounts/              account_commands.py — account-add/account-remove/account-list/account-set-message, flattened into the shared group; see its docstring for why
+  accounts/              account_commands.py — account-add/-remove/-list/-set-message/-set-mention/-info, alerts; flattened into the shared group; see its docstring for why
 platforms/
   base.py              PlatformAdapter interface every platform implements; event_types_for_capabilities() helper
   youtube/               the first concrete adapter — client.py (HTTP), parser.py (pure JSON->shapes), adapter.py (ties them together + quota budgeting)
+  twitch/                 live/offline only — app-token polling, no adapter-level quota budgeting needed (see Twitch adapter section)
+  kick/                   live/offline only — same shape as twitch/, one endpoint does both identifier resolution and live status
+  twitter/                new-post detection — costs real money to enable, see X (Twitter) adapter section
+  instagram/              new-post detection via Business Discovery — real setup/review constraints, see Instagram adapter section
 monitoring/
   manager.py            single start()/stop() entry point; owns one PlatformScheduler per registered adapter
   scheduler.py           polls one platform's enabled accounts on an interval, shared rate limiter
@@ -232,6 +255,68 @@ Credentials: a plain API key, no OAuth (everything above is public data).
 - A real 429 or `quotaExceeded` response additionally pauses that entire platform via the framework's rate-limit path described above.
 
 If you later get a Google quota extension, raise `YOUTUBE_DAILY_QUOTA_UNITS` accordingly — you cannot pay to increase it directly.
+
+## Twitch adapter (platforms/twitch/)
+
+Live/offline detection only (`Capability.LIVE_STATUS`) — see `platforms/twitch/adapter.py`'s module docstring for the full research writeup. Summary:
+
+| Feature | Method | Auth | Notes |
+|---|---|---|---|
+| Live/offline | `GET /helix/streams?user_id=` | app access token | No broadcaster authorization needed — this event requires no scope. |
+| Channel resolution | `GET /helix/users?login=` | app access token | Resolves a login/URL to a stable numeric user ID. |
+
+Credentials: `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET`, an app access token via OAuth client-credentials — no per-broadcaster authorization, no OAuth redirect flow. Twitch's app-token bucket is 800 points/minute and this adapter spends 1 point/account/poll, so unlike YouTube no adapter-level quota budgeting was needed — the framework's own generic per-platform `RateLimiter` (`MONITORING_RATE_LIMIT_REQUESTS`/`_PERIOD_SECONDS`, default 30/60s) is already far more conservative.
+
+**Why polling instead of EventSub, and why that needed sign-off:** EventSub's WebSocket transport would avoid needing a public HTTPS endpoint, but requires a *user* access token capped at a total subscription cost of 10 per (client_id, user) — nowhere near enough for monitoring arbitrary streamers who haven't authorized this app. EventSub's webhook transport works fine with an app token and a 10,000-cost ceiling, but needs a publicly reachable HTTPS callback (valid TLS, port 443) this project doesn't have. Given the choice between (a) polling now or (b) building that public endpoint first, **the user chose (a)** — Twitch's cost/scale here makes polling cheap enough that there's no pressure to build the webhook infrastructure.
+
+## Kick adapter (platforms/kick/)
+
+Live/offline detection only, same shape as the Twitch adapter — see `platforms/kick/adapter.py`'s module docstring. Kick's Public API (docs.kick.com) is close enough to Twitch's own API/OAuth shape that the same polling decision and client structure apply.
+
+| Feature | Method | Auth | Notes |
+|---|---|---|---|
+| Live/offline + channel resolution | `GET /public/v1/channels?slug=` or `?broadcaster_user_id=` | app access token | No broadcaster authorization needed. One endpoint returns both identity and live status (title/category/viewer_count/thumbnail/url) — unlike Twitch, no separate "users" endpoint is needed. |
+
+Credentials: `KICK_CLIENT_ID`/`KICK_CLIENT_SECRET`, an app access token via OAuth client-credentials — same model as Twitch, described by Kick's own docs as usable "when user login is not required."
+
+**One real difference from every other live-status platform: Kick's API exposes no per-session stream ID.** YouTube's video ID and Twitch's `stream.id` both uniquely identify one broadcast session; Kick's channel resource has nothing equivalent. `monitoring/worker.py`'s `platform_event_id` fallback for a missing `stream_id` was fixed during this phase to incorporate `started_at` (not just the account ID) specifically because of this — the original fallback (`f"live-{account_id}"`) would have been the *same string* every time that account went live again, and since the events table's dedup key is `(account_id, event_type, platform_event_id)`, every live notification after an account's first one would have been silently swallowed as "already seen." See `tests/unit/test_worker.py::test_two_separate_live_sessions_without_a_stream_id_get_different_event_ids` for the regression test.
+
+## X (Twitter) adapter (platforms/twitter/)
+
+**Read this before enabling it.** X discontinued its free API tier in February 2026. Reading posts is now billed pay-per-use (roughly $0.005/read, capped at 2,000,000 reads/month) with no free allowance; a legacy fixed-price Basic plan ($200/month) still exists but only for pre-existing subscribers. Setting `TWITTER_BEARER_TOKEN` is an explicit opt-in to a real, ongoing dollar cost that scales with how many accounts you monitor and how often (`MONITORING_CONTENT_POLL_INTERVAL_SECONDS`) — unlike every other platform in this project, which are all free.
+
+| Feature | Method | Notes |
+|---|---|---|
+| New posts | `GET /2/users/{id}/tweets` with a `since_id` cursor | Retweets/replies excluded; requests the API's minimum page size (5) per poll to limit billed reads. |
+| Handle resolution | `GET /2/users/by/username/{username}` | No target authorization needed — public profile data. |
+
+Credentials: `TWITTER_BEARER_TOKEN`, a static app-only Bearer token generated once in the X Developer Portal — no OAuth dance, no per-account authorization, no in-app refresh (same operational model as YouTube's API key). No adapter-level rate limiting beyond the framework's generic per-platform `RateLimiter` — X's constraint here is the operator's own budget, not a platform-side wall this code can safely auto-throttle against.
+
+## Instagram adapter (platforms/instagram/)
+
+**Read this before enabling it — real setup and policy constraints, not just an API key.** As of 2026, Meta's official APIs don't allow discovering or reading an arbitrary Instagram account's content the way Twitch/Kick's app-token model does. The only officially-supported path that doesn't require the *target* account's cooperation is **Business Discovery**:
+
+| Feature | Method | Auth | Notes |
+|---|---|---|---|
+| Profile + recent media | `GET /{your_ig_user_id}?fields=business_discovery.username(...)` | Long-lived access token for **your own** linked IG professional account | No authorization from the target account — but see the constraints below. |
+
+Real constraints, unlike every other adapter in this project:
+1. **The target must itself be a Business or Creator account** — a personal Instagram account can't be monitored this way at all. A hard capability boundary, not a heuristic gap.
+2. **The operator needs their own qualifying setup**: a Meta Developer app, a Facebook Page, and their own Instagram Business/Creator account connected to it — that's where `INSTAGRAM_ACCESS_TOKEN`/`INSTAGRAM_BUSINESS_ACCOUNT_ID` come from.
+3. **Meta App Review is required before this works against arbitrary accounts.** In Development mode, Business Discovery only succeeds against accounts added as testers on the operator's own app.
+4. **Lookup is by username only** — there's no by-ID variant. If a monitored account renames its handle, polling breaks until the account is removed and re-added.
+5. **No webhook exists for this** — it's a straightforward poll; Instagram's webhook system only covers accounts your own app manages.
+
+Credentials renew manually roughly every 60 days — no in-app OAuth refresh flow is implemented, the same trade-off as YouTube's static API key.
+
+## Facebook and TikTok (no adapter)
+
+Neither platform has an official, ToS-compliant way for this bot to monitor a Page/creator that hasn't individually authorized the app — confirmed by research before writing any code, per the standing platform-API policy:
+
+- **Facebook**: reading a Page's posts/feed always needs that Page's admin to authorize the app (`pages_read_engagement`/`pages_read_user_content`) and pass App Review. The closest exception, "Page Public Content Access," would let an approved app read *any* public Page's posts without that Page's cooperation — but it requires Meta Business Verification (a real identity-verification process) and its only listed allowed use case is "analyze and/or display posts and engagement," which a Discord alert bot fits ambiguously at best. Not built this phase; revisit if the operator completes that verification and review.
+- **TikTok**: every official developer surface (the Content Posting API and everything else) is built around a creator connecting *their own* account to your app — the opposite of monitoring a creator you don't control. No discovery/monitoring endpoint exists at all.
+
+Building against either via scraping was considered and rejected — the standing platform-API policy explicitly rules out undocumented/scraped endpoints regardless of how much faster it would ship.
 
 ## Guild isolation
 

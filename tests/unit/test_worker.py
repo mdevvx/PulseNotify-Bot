@@ -7,6 +7,7 @@ these tests exercise the real PlatformAdapter contract."""
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, List, Optional
 
 import pytest
@@ -191,6 +192,28 @@ async def test_live_to_offline_fires_stream_ended(harness: Harness) -> None:
 
     ended = [e for e in harness.submitted if e.event_type == EventType.STREAM_ENDED]
     assert len(ended) == 1
+
+
+async def test_two_separate_live_sessions_without_a_stream_id_get_different_event_ids(harness: Harness) -> None:
+    """Regression test: a platform whose LiveStatus never carries a
+    stream_id (e.g. Kick) must not have its synthetic fallback ID collide
+    across two different go-live sessions of the same account — that would
+    silently dedup every STREAM_STARTED after the first one forever, since
+    the events table's unique key is (account_id, event_type,
+    platform_event_id)."""
+    harness.adapter.live_queue = [
+        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime(2026, 1, 1)),
+        LiveStatus(is_live=False),
+        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime(2026, 1, 2)),
+    ]
+
+    await harness.worker.poll_once()  # goes live (session 1)
+    await harness.worker.poll_once()  # goes offline
+    await harness.worker.poll_once()  # goes live again (session 2)
+
+    started = [e for e in harness.submitted if e.event_type == EventType.STREAM_STARTED]
+    assert len(started) == 2
+    assert started[0].platform_event_id != started[1].platform_event_id
 
 
 async def test_restart_with_already_live_state_does_not_reannounce(harness: Harness) -> None:

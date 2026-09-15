@@ -1,5 +1,7 @@
-"""`/pulsenotify account-add|account-remove|account-list` — Phase 4's
-account-registration commands.
+"""`/pulsenotify account-add|account-remove|account-list|account-set-message|
+account-set-mention|account-info|alerts` — account registration (Phase 4)
+plus per-account alert configuration (Phase 4's account-set-message, and
+Phase 8's account-set-mention/alerts/account-info).
 
 Flattened as direct subcommands of the shared pulsenotify_group rather
 than nested under their own "account" subcommand group: Discord doesn't
@@ -35,7 +37,13 @@ logger = get_logger(__name__)
 # Grows by one Choice per phase as each platform adapter is registered
 # (Phase 5: Twitch, Phase 6: Kick, ...) — nothing else about these
 # commands needs to change when that happens.
-_PLATFORM_CHOICES = [app_commands.Choice(name="YouTube", value="youtube")]
+_PLATFORM_CHOICES = [
+    app_commands.Choice(name="YouTube", value="youtube"),
+    app_commands.Choice(name="Twitch", value="twitch"),
+    app_commands.Choice(name="Kick", value="kick"),
+    app_commands.Choice(name="X (Twitter)", value="twitter"),
+    app_commands.Choice(name="Instagram", value="instagram"),
+]
 
 _STATUS_ICONS = {"active": "🟢", "invalid": "🔴", "error": "🟡"}
 
@@ -48,6 +56,8 @@ _EVENT_TYPE_CHOICES = [
     app_commands.Choice(name="Stream Updated", value=EventType.STREAM_UPDATED.value),
     app_commands.Choice(name="Account Updated", value=EventType.ACCOUNT_UPDATED.value),
 ]
+
+_EVENT_TYPE_LABELS = {choice.value: choice.name for choice in _EVENT_TYPE_CHOICES}
 
 _CLEAR_KEYWORDS = {"clear", "reset", "default"}
 
@@ -286,6 +296,178 @@ async def account_set_message(
     await interaction.response.send_message(
         f"✅ Custom message set for **{row['username']}** {scope}.\n\n**Preview:**\n{preview}"
     )
+
+
+@pulsenotify_group.command(
+    name="account-set-mention",
+    description="Set the role to mention for an account's alerts (omit role to clear it).",
+)
+@app_commands.describe(
+    account="The account to configure",
+    role="Role to mention when this account posts or goes live (omit to clear the mention)",
+    event_type="Only apply to this event type (optional — applies to every event type this account currently has configured)",
+)
+@app_commands.autocomplete(account=_account_autocomplete)
+@app_commands.choices(event_type=_EVENT_TYPE_CHOICES)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def account_set_mention(
+    interaction: discord.Interaction,
+    account: str,
+    role: Optional[discord.Role] = None,
+    event_type: Optional[app_commands.Choice[str]] = None,
+) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    if not _is_valid_account_id(account):
+        await interaction.response.send_message(_NOT_A_VALID_ACCOUNT_MESSAGE, ephemeral=True)
+        return
+
+    row = await bot.accounts_repo.get_by_guild(interaction.guild.id, account)  # type: ignore[attr-defined]
+    if row is None:
+        await interaction.response.send_message("That account isn't configured in this server.", ephemeral=True)
+        return
+
+    updated = await bot.alert_configs_repo.set_mention_role(  # type: ignore[attr-defined]
+        account,
+        role.id if role else None,
+        event_type=event_type.value if event_type else None,
+    )
+    if updated == 0:
+        scope = f" for the **{event_type.name}** alert type" if event_type else ""
+        await interaction.response.send_message(
+            f"**{row['username']}** doesn't have an alert configuration{scope} yet.", ephemeral=True
+        )
+        return
+
+    scope = f"for **{event_type.name}**" if event_type else "for all its currently configured alert types"
+    logger.info(
+        "Guild %s %s mention role for account %s (%s) %s",
+        interaction.guild.id,
+        "cleared" if role is None else f"set to role {role.id}",
+        row["username"],
+        account,
+        scope,
+    )
+
+    if role is None:
+        await interaction.response.send_message(f"🧹 Cleared the mention role for **{row['username']}** {scope}.")
+        return
+
+    await interaction.response.send_message(f"✅ **{row['username']}** will now mention {role.mention} {scope}.")
+
+
+@pulsenotify_group.command(
+    name="alerts", description="View or change whether an event type notifies, and whether it uses an embed."
+)
+@app_commands.describe(
+    account="The account to configure",
+    event_type="Which event type to view or change",
+    enabled="Turn this alert on or off (omit both this and embed to just view the current setting)",
+    embed="Show the rich embed for this alert, instead of plain text (omit to leave unchanged)",
+)
+@app_commands.autocomplete(account=_account_autocomplete)
+@app_commands.choices(event_type=_EVENT_TYPE_CHOICES)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def alerts(
+    interaction: discord.Interaction,
+    account: str,
+    event_type: app_commands.Choice[str],
+    enabled: Optional[bool] = None,
+    embed: Optional[bool] = None,
+) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    if not _is_valid_account_id(account):
+        await interaction.response.send_message(_NOT_A_VALID_ACCOUNT_MESSAGE, ephemeral=True)
+        return
+
+    row = await bot.accounts_repo.get_by_guild(interaction.guild.id, account)  # type: ignore[attr-defined]
+    if row is None:
+        await interaction.response.send_message("That account isn't configured in this server.", ephemeral=True)
+        return
+
+    if enabled is None and embed is None:
+        config = await bot.alert_configs_repo.get(account, event_type.value)  # type: ignore[attr-defined]
+        if config is None:
+            await interaction.response.send_message(
+                f"**{row['username']}** doesn't have an alert configuration for **{event_type.name}** yet.",
+                ephemeral=True,
+            )
+            return
+        state = "✅ On" if config["enabled"] else "❌ Off"
+        embed_state = "✅ On" if config["embed_enabled"] else "❌ Off"
+        await interaction.response.send_message(
+            f"**{row['username']}** — {event_type.name}\nAlert: {state}\nEmbed: {embed_state}"
+        )
+        return
+
+    updated = await bot.alert_configs_repo.set_alert_toggle(  # type: ignore[attr-defined]
+        account, event_type.value, enabled=enabled, embed_enabled=embed
+    )
+    if updated == 0:
+        await interaction.response.send_message(
+            f"**{row['username']}** doesn't have an alert configuration for **{event_type.name}** yet.",
+            ephemeral=True,
+        )
+        return
+
+    changes = []
+    if enabled is not None:
+        changes.append(f"alert {'enabled' if enabled else 'disabled'}")
+    if embed is not None:
+        changes.append(f"embed {'enabled' if embed else 'disabled'}")
+    logger.info(
+        "Guild %s updated alerts for account %s (%s) %s: %s",
+        interaction.guild.id,
+        row["username"],
+        account,
+        event_type.value,
+        ", ".join(changes),
+    )
+    await interaction.response.send_message(f"✅ **{row['username']}** — {event_type.name}: {', '.join(changes)}.")
+
+
+@pulsenotify_group.command(
+    name="account-info", description="Show an account's full alert configuration — per event type."
+)
+@app_commands.describe(account="The account to inspect")
+@app_commands.autocomplete(account=_account_autocomplete)
+async def account_info(interaction: discord.Interaction, account: str) -> None:
+    assert interaction.guild is not None
+    bot = interaction.client
+    if not _is_valid_account_id(account):
+        await interaction.response.send_message(_NOT_A_VALID_ACCOUNT_MESSAGE, ephemeral=True)
+        return
+
+    row = await bot.accounts_repo.get_by_guild(interaction.guild.id, account)  # type: ignore[attr-defined]
+    if row is None:
+        await interaction.response.send_message("That account isn't configured in this server.", ephemeral=True)
+        return
+
+    configs = await bot.alert_configs_repo.list_for_account(account)  # type: ignore[attr-defined]
+    if not configs:
+        await interaction.response.send_message(
+            f"**{row['username']}** has no alert configuration yet.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"{row['username']} — {row['platform'].title()}", color=discord.Color(constants.COLOR_INFO)
+    )
+    for config in sorted(configs, key=lambda c: c["event_type"]):
+        label = _EVENT_TYPE_LABELS.get(config["event_type"], config["event_type"])
+        state = "✅ On" if config["enabled"] else "❌ Off"
+        embed_state = "embed on" if config["embed_enabled"] else "embed off"
+        mention = f"<@&{config['mention_role_id']}>" if config["mention_role_id"] else "no mention"
+        value = f"{state} · {embed_state} · {mention}"
+        if config.get("custom_message"):
+            preview = config["custom_message"]
+            if len(preview) > 150:
+                preview = preview[:149] + "…"
+            value += f"\nCustom message: {preview}"
+        embed.add_field(name=label, value=value, inline=False)
+
+    await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot) -> None:

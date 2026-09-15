@@ -94,6 +94,7 @@ class LiveStatus:
     viewer_count: Optional[int] = None
     started_at: Optional[Any] = None  # datetime; Any avoids importing datetime just for this
     thumbnail_url: Optional[str] = None
+    url: Optional[str] = None
 
 
 @dataclass(frozen=True)

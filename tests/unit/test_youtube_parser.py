@@ -145,6 +145,12 @@ def test_video_to_live_status_handles_missing_viewer_count() -> None:
     assert status.viewer_count is None
 
 
+def test_video_to_live_status_builds_the_watch_url() -> None:
+    video = {"id": "vid-live", "snippet": {"liveBroadcastContent": "live"}, "liveStreamingDetails": {}}
+    status = parser.video_to_live_status(video)
+    assert status.url == "https://www.youtube.com/watch?v=vid-live"
+
+
 # ── duration parsing ──────────────────────────────────────────────────────
 
 

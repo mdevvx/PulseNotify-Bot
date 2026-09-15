@@ -25,6 +25,14 @@ from database.repositories.channels import NotificationChannelRepository
 from database.repositories.guilds import GuildRepository
 from monitoring.manager import MonitoringManager
 from notifications.sender import NotificationSender
+from platforms.instagram.adapter import InstagramAdapter
+from platforms.instagram.client import InstagramClient
+from platforms.kick.adapter import KickAdapter
+from platforms.kick.client import KickClient
+from platforms.twitch.adapter import TwitchAdapter
+from platforms.twitch.client import TwitchClient
+from platforms.twitter.adapter import TwitterAdapter
+from platforms.twitter.client import TwitterClient
 from platforms.youtube.adapter import YouTubeAdapter
 from platforms.youtube.client import YouTubeClient
 from utils.logger import get_logger
@@ -154,6 +162,46 @@ class PulseNotifyBot(commands.Bot):
             self.monitoring.register_adapter(adapter)
         else:
             logger.warning("YOUTUBE_API_KEY not set — YouTube monitoring is disabled.")
+
+        if self.settings.twitch_client_id and self.settings.twitch_client_secret:
+            twitch_client = TwitchClient(
+                self.settings.twitch_client_id,
+                self.settings.twitch_client_secret,
+                timeout_seconds=self.settings.monitoring_http_timeout_seconds,
+            )
+            self.monitoring.register_adapter(TwitchAdapter(twitch_client))
+        else:
+            logger.warning("TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET not set — Twitch monitoring is disabled.")
+
+        if self.settings.kick_client_id and self.settings.kick_client_secret:
+            kick_client = KickClient(
+                self.settings.kick_client_id,
+                self.settings.kick_client_secret,
+                timeout_seconds=self.settings.monitoring_http_timeout_seconds,
+            )
+            self.monitoring.register_adapter(KickAdapter(kick_client))
+        else:
+            logger.warning("KICK_CLIENT_ID/KICK_CLIENT_SECRET not set — Kick monitoring is disabled.")
+
+        if self.settings.twitter_bearer_token:
+            twitter_client = TwitterClient(
+                self.settings.twitter_bearer_token, timeout_seconds=self.settings.monitoring_http_timeout_seconds
+            )
+            self.monitoring.register_adapter(TwitterAdapter(twitter_client))
+        else:
+            logger.warning("TWITTER_BEARER_TOKEN not set — X/Twitter monitoring is disabled.")
+
+        if self.settings.instagram_access_token and self.settings.instagram_business_account_id:
+            instagram_client = InstagramClient(
+                self.settings.instagram_access_token,
+                self.settings.instagram_business_account_id,
+                timeout_seconds=self.settings.monitoring_http_timeout_seconds,
+            )
+            self.monitoring.register_adapter(InstagramAdapter(instagram_client))
+        else:
+            logger.warning(
+                "INSTAGRAM_ACCESS_TOKEN/INSTAGRAM_BUSINESS_ACCOUNT_ID not set — Instagram monitoring is disabled."
+            )
 
     async def _resolve_owners(self) -> None:
         owner_ids = set(self.settings.discord_owner_ids)

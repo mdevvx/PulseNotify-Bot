@@ -41,14 +41,31 @@ class Settings(BaseSettings):
     supabase_key: str = Field(..., min_length=1, alias="SUPABASE_KEY")
 
     # Platform credentials are intentionally optional in the foundation phase.
-    twitter_api_key: Optional[str] = Field(default=None, alias="TWITTER_API_KEY")
-    twitter_api_secret: Optional[str] = Field(default=None, alias="TWITTER_API_SECRET")
+    # X API v2 (Phase 7) — a static app-only Bearer token from the X
+    # Developer Portal, not a key/secret pair (see platforms/twitter/adapter.py
+    # for why, and the real per-read cost: X has no free read tier as of
+    # 2026).
+    twitter_bearer_token: Optional[str] = Field(default=None, alias="TWITTER_BEARER_TOKEN")
     youtube_api_key: Optional[str] = Field(default=None, alias="YOUTUBE_API_KEY")
     twitch_client_id: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_ID")
     twitch_client_secret: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_SECRET")
-    kick_api_key: Optional[str] = Field(default=None, alias="KICK_API_KEY")
-    instagram_api_key: Optional[str] = Field(default=None, alias="INSTAGRAM_API_KEY")
-    facebook_api_key: Optional[str] = Field(default=None, alias="FACEBOOK_API_KEY")
+    # Kick's Public API (docs.kick.com) authenticates the same way Twitch's
+    # does — an OAuth client-credentials grant, not a single opaque API
+    # key — so this is a client_id/secret pair, not *_API_KEY.
+    kick_client_id: Optional[str] = Field(default=None, alias="KICK_CLIENT_ID")
+    kick_client_secret: Optional[str] = Field(default=None, alias="KICK_CLIENT_SECRET")
+    # Instagram Graph API Business Discovery (Phase 7) — a long-lived Page
+    # access token belonging to the *bot operator's own* connected
+    # Instagram professional account, plus that account's own IG user ID
+    # (see platforms/instagram/adapter.py for exactly why both are needed
+    # and what this can/can't monitor). Renewed manually every ~60 days;
+    # no in-app OAuth refresh flow is implemented.
+    instagram_access_token: Optional[str] = Field(default=None, alias="INSTAGRAM_ACCESS_TOKEN")
+    instagram_business_account_id: Optional[str] = Field(default=None, alias="INSTAGRAM_BUSINESS_ACCOUNT_ID")
+    # Facebook and TikTok have no adapter (Phase 7) — neither platform
+    # offers an official, ToS-compliant way to monitor a page/creator that
+    # hasn't individually authorized this app. See README's Phase 7
+    # section for the research behind that conclusion.
 
     # Monitoring framework configuration (section 28: one place for these,
     # not scattered through the code). Content polling is far less

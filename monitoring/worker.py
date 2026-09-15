@@ -9,6 +9,7 @@ crash the entire monitoring service").
 from __future__ import annotations
 
 import dataclasses
+import datetime
 from typing import Awaitable, Callable, Optional
 
 from database.repositories.accounts import PlatformAccountRepository
@@ -28,6 +29,10 @@ logger = get_logger(__name__)
 # sensible default than to treat "rate limited, no Retry-After" as "keep
 # hammering it."
 _DEFAULT_RATE_LIMIT_WAIT_SECONDS = 60.0
+
+
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 class AccountWorker:
@@ -112,8 +117,16 @@ class AccountWorker:
                     platform_account_id=self._account_ref.platform_account_id,
                     account_username=self._account_ref.username,
                     event_type=EventType.STREAM_STARTED,
-                    platform_event_id=status.stream_id or f"live-{self._account_id}",
+                    # Falls back to a synthetic ID only for a platform whose
+                    # API exposes no per-session stream ID (e.g. Kick) — it
+                    # must vary per *session*, not just per account, or the
+                    # dedup unique constraint on (account_id, event_type,
+                    # platform_event_id) would silently swallow every live
+                    # notification after that account's very first one.
+                    platform_event_id=status.stream_id
+                    or f"live-{self._account_id}-{(status.started_at or _utcnow()).isoformat()}",
                     title=status.title,
+                    url=status.url,
                     thumbnail_url=status.thumbnail_url,
                     started_at=status.started_at,
                     metadata={"category": status.category, "viewer_count": status.viewer_count},

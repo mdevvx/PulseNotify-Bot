@@ -91,3 +91,101 @@ async def test_set_custom_message_none_clears_it(repo: AlertConfigurationReposit
 async def test_set_custom_message_for_unknown_account_updates_nothing(repo: AlertConfigurationRepository) -> None:
     updated = await repo.set_custom_message("no-such-account", "hello")
     assert updated == 0
+
+
+async def test_set_mention_role_applies_to_all_event_types_by_default(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published", "stream_started"])
+
+    updated = await repo.set_mention_role("acc-1", 999)
+
+    assert updated == 2
+    video = await repo.get("acc-1", "video_published")
+    stream = await repo.get("acc-1", "stream_started")
+    assert video is not None and video["mention_role_id"] == 999
+    assert stream is not None and stream["mention_role_id"] == 999
+
+
+async def test_set_mention_role_can_target_one_event_type_only(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published", "stream_started"])
+
+    updated = await repo.set_mention_role("acc-1", 999, event_type="stream_started")
+
+    assert updated == 1
+    video = await repo.get("acc-1", "video_published")
+    stream = await repo.get("acc-1", "stream_started")
+    assert video is not None and video["mention_role_id"] is None
+    assert stream is not None and stream["mention_role_id"] == 999
+
+
+async def test_set_mention_role_none_clears_it(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published"])
+    await repo.set_mention_role("acc-1", 999)
+
+    await repo.set_mention_role("acc-1", None)
+
+    row = await repo.get("acc-1", "video_published")
+    assert row is not None and row["mention_role_id"] is None
+
+
+async def test_set_mention_role_for_unknown_account_updates_nothing(repo: AlertConfigurationRepository) -> None:
+    updated = await repo.set_mention_role("no-such-account", 999)
+    assert updated == 0
+
+
+async def test_set_alert_toggle_updates_enabled_only(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published"])
+
+    updated = await repo.set_alert_toggle("acc-1", "video_published", enabled=False)
+
+    assert updated == 1
+    row = await repo.get("acc-1", "video_published")
+    assert row is not None
+    assert row["enabled"] is False
+    assert row["embed_enabled"] is True  # untouched
+
+
+async def test_set_alert_toggle_updates_embed_enabled_only() -> None:
+    repo = AlertConfigurationRepository(FakeDatabase())  # type: ignore[arg-type]
+    await repo.seed_defaults(1, "acc-1", ["video_published"])
+
+    updated = await repo.set_alert_toggle("acc-1", "video_published", embed_enabled=False)
+
+    assert updated == 1
+    row = await repo.get("acc-1", "video_published")
+    assert row is not None
+    assert row["enabled"] is True  # untouched
+    assert row["embed_enabled"] is False
+
+
+async def test_set_alert_toggle_updates_both_at_once(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published"])
+
+    updated = await repo.set_alert_toggle("acc-1", "video_published", enabled=False, embed_enabled=False)
+
+    assert updated == 1
+    row = await repo.get("acc-1", "video_published")
+    assert row is not None
+    assert row["enabled"] is False
+    assert row["embed_enabled"] is False
+
+
+async def test_set_alert_toggle_only_targets_the_given_event_type(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published", "stream_started"])
+
+    await repo.set_alert_toggle("acc-1", "video_published", enabled=False)
+
+    stream = await repo.get("acc-1", "stream_started")
+    assert stream is not None and stream["enabled"] is True
+
+
+async def test_set_alert_toggle_with_nothing_to_change_updates_nothing(repo: AlertConfigurationRepository) -> None:
+    await repo.seed_defaults(1, "acc-1", ["video_published"])
+
+    updated = await repo.set_alert_toggle("acc-1", "video_published")
+
+    assert updated == 0
+
+
+async def test_set_alert_toggle_for_unknown_account_updates_nothing(repo: AlertConfigurationRepository) -> None:
+    updated = await repo.set_alert_toggle("no-such-account", "video_published", enabled=False)
+    assert updated == 0

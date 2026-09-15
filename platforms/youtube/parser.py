@@ -95,14 +95,16 @@ def video_to_live_status(video: Dict[str, Any]) -> LiveStatus:
     snippet = video.get("snippet", {})
     live_details = video.get("liveStreamingDetails", {})
 
+    video_id = video.get("id")
     return LiveStatus(
         is_live=snippet.get("liveBroadcastContent") == "live",
-        stream_id=video.get("id"),
+        stream_id=video_id,
         title=snippet.get("title"),
         category=None,  # not exposed for a channel this bot doesn't own, without extra API calls
         viewer_count=_safe_int(live_details.get("concurrentViewers")),
         started_at=_parse_timestamp(live_details.get("actualStartTime")),
         thumbnail_url=_best_thumbnail(snippet.get("thumbnails")),
+        url=f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
     )
 
 
