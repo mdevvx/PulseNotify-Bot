@@ -84,3 +84,29 @@ async def test_one_channel_can_be_linked_to_multiple_accounts(repo: Notification
 
     assert len(await repo.list_valid_for_account("acc-1")) == 1
     assert len(await repo.list_valid_for_account("acc-2")) == 1
+
+
+async def test_new_channel_has_no_webhook_url_by_default(repo: NotificationChannelRepository) -> None:
+    row = await repo.get_or_create(1, 555)
+    assert row["webhook_url"] is None
+
+
+async def test_set_webhook_url_persists_it(repo: NotificationChannelRepository) -> None:
+    row = await repo.get_or_create(1, 555)
+
+    await repo.set_webhook_url(row["id"], "https://discord.com/api/webhooks/555/token")
+
+    updated = await repo.get_by_discord_channel(1, 555)
+    assert updated is not None
+    assert updated["webhook_url"] == "https://discord.com/api/webhooks/555/token"
+
+
+async def test_set_webhook_url_none_clears_it(repo: NotificationChannelRepository) -> None:
+    row = await repo.get_or_create(1, 555)
+    await repo.set_webhook_url(row["id"], "https://discord.com/api/webhooks/555/token")
+
+    await repo.set_webhook_url(row["id"], None)
+
+    updated = await repo.get_by_discord_channel(1, 555)
+    assert updated is not None
+    assert updated["webhook_url"] is None

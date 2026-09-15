@@ -67,12 +67,13 @@ Before any platform integration is built: verify that platform's *current* offic
    - [database/migrations/0001_create_guilds.sql](database/migrations/0001_create_guilds.sql)
    - [database/migrations/0002_core_schema.sql](database/migrations/0002_core_schema.sql)
    - [database/migrations/0003_add_content_cursor.sql](database/migrations/0003_add_content_cursor.sql)
+   - [database/migrations/0004_add_webhook_url.sql](database/migrations/0004_add_webhook_url.sql)
 
    More migrations are added as later phases need them.
 
 4. **Invite the bot**
 
-   Generate an invite URL in the Developer Portal with the `bot` and `applications.commands` scopes, and at least `Send Messages`, `Embed Links`, `Use Slash Commands`.
+   Generate an invite URL in the Developer Portal with the `bot` and `applications.commands` scopes, and at least `Send Messages`, `Embed Links`, `Use Slash Commands`, `Manage Webhooks` (notifications are delivered through a per-channel webhook, not the bot's own user — see the Monitoring framework section below; without this permission, the bot falls back to sending as itself instead).
 
 5. **Run it**
 
@@ -200,6 +201,7 @@ Three migrations exist so far:
   - `pulsenotify_audit_logs` — append-only record of administrative actions; not written by anything yet
   - `pulsenotify_platform_health` — **not** guild-scoped; one row per platform (YouTube, Twitch, ...) tracking the bot's own API usage/quota/rate-limit state against that provider — created on first use
 - **`0003_add_content_cursor.sql`** — adds `pulsenotify_platform_accounts.content_cursor`, the persisted "newest content seen" pointer. Found and fixed during Phase 4: without persisting it, a bot restart reset an account's cursor to NULL, which would either re-flood the channel's entire back-catalog or silently skip whatever was published during the downtime, depending on how that case was handled. See `monitoring/worker.py`'s docstring.
+- **`0004_add_webhook_url.sql`** — adds `pulsenotify_notification_channels.webhook_url`, so the per-channel Discord webhook notifications are delivered through (see Monitoring framework below) is created once and reused across restarts instead of a new one appearing every time the bot starts up.
 
 `platform`, `event_type`, and `account_status` are Postgres domains (not raw `text`), so the valid-value list for each lives in exactly one `ALTER DOMAIN`-able place instead of being repeated across every column that uses it.
 
@@ -230,6 +232,7 @@ What's real and tested:
 - **Live-transition detection** — the worker, not the adapter, compares a `LiveStatus` snapshot against the persisted `pulsenotify_live_states` row to decide whether to fire `STREAM_STARTED`/`STREAM_ENDED` — this is what makes "don't re-announce a stream that was already live before a restart" (section 8) work for every platform for free, rather than every adapter reimplementing it.
 - **Deduplication** — `EventProcessor` is the one place that checks `pulsenotify_events` and decides "new" vs "already seen," so that guarantee holds regardless of which worker or platform produced the event.
 - **Notification delivery** — `EventProcessor`'s sink is `NotificationSender.handle` ([notifications/sender.py](notifications/sender.py)): checks the account's alert config for that event type, builds an embed (or plain text if embeds are disabled for that account), scopes mentions to just the configured role (`AllowedMentions`, never `@everyone`/arbitrary users — section 36), and sends to every channel linked to that account. A channel Discord says is gone (`Forbidden`/`NotFound`) gets marked `is_valid=false` instead of retried forever (section 23); other Discord errors are logged and skipped, not treated as fatal.
+- **Delivery is via a per-channel webhook, not the bot's own user.** The first notification to a channel creates a Discord webhook there (named after the bot) and persists its URL on the channel row (`webhook_url`, migration 0004); every notification after that reuses it. Each send sets the webhook's `username` to the posting account's name, so an alert shows up as e.g. "SomeCreator" rather than always as the bot. If the bot lacks "Manage Webhooks" in a channel, or the webhook was deleted from Discord's side, it falls back to sending as the bot itself (and clears the stale URL so the next notification retries creating one) rather than dropping the alert.
 
 **Known architectural gap:** this framework is polling-shaped — `PlatformScheduler` calls `fetch_updates()`/`get_live_status()` on an interval. The platform-API policy above prefers webhooks (Twitch EventSub, YouTube WebSub) where a platform offers them and the cost of polling is too high; a webhook-based platform will need its own inbound HTTP receiver feeding events into the same `EventProcessor.submit()`, bypassing the polling scheduler rather than being forced through it. Not designed yet.
 

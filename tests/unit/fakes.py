@@ -144,7 +144,7 @@ class FakeDatabase:
             "pulsenotify_live_states": FakeTable(unique_on=[("account_id",)], defaults={"is_live": False}),
             "pulsenotify_notification_channels": FakeTable(
                 unique_on=[("id",), ("guild_id", "channel_id")],
-                defaults={"is_valid": True, "name": None},
+                defaults={"is_valid": True, "name": None, "webhook_url": None},
                 has_generated_id=True,
             ),
             "pulsenotify_account_channels": FakeTable(unique_on=[("account_id", "channel_id")]),

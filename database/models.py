@@ -56,6 +56,7 @@ class NotificationChannelRow(TypedDict):
     channel_id: int
     name: Optional[str]
     is_valid: bool
+    webhook_url: Optional[str]
     created_at: str
     updated_at: str
 

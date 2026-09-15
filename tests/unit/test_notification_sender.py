@@ -21,18 +21,63 @@ def _fake_http_exception(cls, status: int = 404, reason: str = "Not Found") -> d
     return cls(response, "")
 
 
+class FakeWebhook:
+    """Sends land in the owning channel's `.sent` list, same as a direct
+    channel.send() — from the test's perspective, "what actually reached
+    the channel" is what matters, regardless of which path delivered it."""
+
+    def __init__(self, url: str, channel: "FakeDiscordChannel") -> None:
+        self.url = url
+        self._channel = channel
+
+    async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False, username=None):
+        if self._channel.raise_on_webhook_send:
+            raise self._channel.raise_on_webhook_send
+        self._channel.sent.append(
+            {
+                "content": content,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+                "suppress_embeds": suppress_embeds,
+                "username": username,
+            }
+        )
+
+
 class FakeDiscordChannel:
-    def __init__(self, channel_id: int, *, raise_on_send: Optional[BaseException] = None) -> None:
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        raise_on_send: Optional[BaseException] = None,
+        raise_on_create_webhook: Optional[BaseException] = None,
+        raise_on_webhook_send: Optional[BaseException] = None,
+    ) -> None:
         self.id = channel_id
         self.raise_on_send = raise_on_send
+        self.raise_on_create_webhook = raise_on_create_webhook
+        self.raise_on_webhook_send = raise_on_webhook_send
         self.sent: List[Dict[str, Any]] = []
+        self.create_webhook_calls = 0
 
     async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False):
         if self.raise_on_send:
             raise self.raise_on_send
         self.sent.append(
-            {"content": content, "embed": embed, "allowed_mentions": allowed_mentions, "suppress_embeds": suppress_embeds}
+            {
+                "content": content,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+                "suppress_embeds": suppress_embeds,
+                "username": None,
+            }
         )
+
+    async def create_webhook(self, *, name: str):
+        self.create_webhook_calls += 1
+        if self.raise_on_create_webhook:
+            raise self.raise_on_create_webhook
+        return FakeWebhook(f"https://discord.com/api/webhooks/{self.id}/faketoken", self)
 
 
 class FakeBot:
@@ -62,12 +107,23 @@ class Harness:
         self.alert_repo = AlertConfigurationRepository(self.db)  # type: ignore[arg-type]
         self.channel_repo = NotificationChannelRepository(self.db)  # type: ignore[arg-type]
         self.bot = FakeBot()
-        self.sender = NotificationSender(self.bot, self.alert_repo, self.channel_repo)  # type: ignore[arg-type]
+        self.sender = NotificationSender(  # type: ignore[arg-type]
+            self.bot, self.alert_repo, self.channel_repo, webhook_from_url=self._fake_webhook_from_url
+        )
 
-    async def add_channel(self, guild_id: int, account_id: str, discord_channel_id: int) -> FakeDiscordChannel:
+    def _fake_webhook_from_url(self, url: str, *, client=None) -> FakeWebhook:
+        # The fake URL format is ".../webhooks/{channel_id}/faketoken" —
+        # parse the channel id back out to find which fake channel this
+        # (persisted, then re-loaded) webhook belongs to.
+        channel_id = int(url.rsplit("/", 2)[-2])
+        channel = self.bot._cached.get(channel_id) or self.bot._fetchable.get(channel_id)
+        assert channel is not None, f"no fake channel registered for webhook url {url}"
+        return FakeWebhook(url, channel)  # type: ignore[return-value]
+
+    async def add_channel(self, guild_id: int, account_id: str, discord_channel_id: int, **channel_kwargs: Any) -> FakeDiscordChannel:
         row = await self.channel_repo.get_or_create(guild_id, discord_channel_id)
         await self.channel_repo.link_account(guild_id, account_id, row["id"])
-        channel = FakeDiscordChannel(discord_channel_id)
+        channel = FakeDiscordChannel(discord_channel_id, **channel_kwargs)
         self.bot.cache(channel)
         return channel
 
@@ -252,9 +308,16 @@ async def test_sends_to_every_linked_channel(harness: Harness) -> None:
 
 
 async def test_forbidden_on_send_marks_the_channel_invalid(harness: Harness) -> None:
+    """Exercises the direct-send fallback path (webhook creation itself
+    failing here for an unrelated reason) — the channel-invalid handling
+    must still work the same regardless of which path actually sent."""
     row = await harness.channel_repo.get_or_create(1, 555)
     await harness.channel_repo.link_account(1, "acc-1", row["id"])
-    channel = FakeDiscordChannel(555, raise_on_send=_fake_http_exception(discord.Forbidden, status=403))
+    channel = FakeDiscordChannel(
+        555,
+        raise_on_create_webhook=_fake_http_exception(discord.HTTPException, status=500),
+        raise_on_send=_fake_http_exception(discord.Forbidden, status=403),
+    )
     harness.bot.cache(channel)
 
     await harness.sender.handle(_event())  # must not raise
@@ -267,7 +330,11 @@ async def test_forbidden_on_send_marks_the_channel_invalid(harness: Harness) -> 
 async def test_not_found_on_send_marks_the_channel_invalid(harness: Harness) -> None:
     row = await harness.channel_repo.get_or_create(1, 555)
     await harness.channel_repo.link_account(1, "acc-1", row["id"])
-    channel = FakeDiscordChannel(555, raise_on_send=_fake_http_exception(discord.NotFound, status=404))
+    channel = FakeDiscordChannel(
+        555,
+        raise_on_create_webhook=_fake_http_exception(discord.HTTPException, status=500),
+        raise_on_send=_fake_http_exception(discord.NotFound, status=404),
+    )
     harness.bot.cache(channel)
 
     await harness.sender.handle(_event())  # must not raise
@@ -280,7 +347,11 @@ async def test_not_found_on_send_marks_the_channel_invalid(harness: Harness) -> 
 async def test_generic_http_exception_on_send_does_not_mark_invalid(harness: Harness) -> None:
     row = await harness.channel_repo.get_or_create(1, 555)
     await harness.channel_repo.link_account(1, "acc-1", row["id"])
-    channel = FakeDiscordChannel(555, raise_on_send=_fake_http_exception(discord.HTTPException, status=500))
+    channel = FakeDiscordChannel(
+        555,
+        raise_on_create_webhook=_fake_http_exception(discord.HTTPException, status=500),
+        raise_on_send=_fake_http_exception(discord.HTTPException, status=500),
+    )
     harness.bot.cache(channel)
 
     await harness.sender.handle(_event())  # must not raise
@@ -288,6 +359,71 @@ async def test_generic_http_exception_on_send_does_not_mark_invalid(harness: Har
     updated = await harness.channel_repo.get_by_discord_channel(1, 555)
     assert updated is not None
     assert updated["is_valid"] is True  # a transient server error isn't "gone"
+
+
+# ── webhook delivery (section: notifications appear as the posting account) ──
+
+
+async def test_first_notification_creates_and_persists_a_webhook(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event())
+
+    assert channel.create_webhook_calls == 1
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None
+    assert updated["webhook_url"] == f"https://discord.com/api/webhooks/555/faketoken"
+
+
+async def test_second_notification_reuses_the_persisted_webhook(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event())
+    await harness.sender.handle(_event(platform_event_id="vid-2"))
+
+    assert channel.create_webhook_calls == 1  # not once per notification
+    assert len(channel.sent) == 2
+
+
+async def test_webhook_send_uses_the_account_username(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event(account_username="SomeCreator"))
+
+    assert channel.sent[0]["username"] == "SomeCreator"
+
+
+async def test_missing_manage_webhooks_permission_falls_back_to_sending_as_the_bot(harness: Harness) -> None:
+    row = await harness.channel_repo.get_or_create(1, 555)
+    await harness.channel_repo.link_account(1, "acc-1", row["id"])
+    channel = FakeDiscordChannel(
+        555, raise_on_create_webhook=_fake_http_exception(discord.Forbidden, status=403)
+    )
+    harness.bot.cache(channel)
+
+    await harness.sender.handle(_event())
+
+    assert len(channel.sent) == 1
+    assert channel.sent[0]["username"] is None  # delivered as the bot, not a webhook identity
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None
+    assert updated["webhook_url"] is None  # never persisted since creation failed
+
+
+async def test_deleted_webhook_is_cleared_and_falls_back_for_that_send(harness: Harness) -> None:
+    """Simulates a server admin deleting the webhook from Discord's side
+    sometime after PulseNotify created and persisted it."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.sender.handle(_event())  # creates + persists the webhook normally
+    assert channel.create_webhook_calls == 1
+
+    channel.raise_on_webhook_send = _fake_http_exception(discord.NotFound, status=404)
+    await harness.sender.handle(_event(platform_event_id="vid-2"))  # must not raise or drop the notification
+
+    assert len(channel.sent) == 2  # first via the webhook, second via the direct-send fallback
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None
+    assert updated["webhook_url"] is None  # cleared so the next notification recreates one
 
 
 async def test_channel_not_in_cache_falls_back_to_fetch(harness: Harness) -> None:

@@ -66,6 +66,16 @@ class NotificationChannelRepository:
     async def mark_invalid(self, channel_row_id: str) -> None:
         await self._db.client.table(_CHANNELS_TABLE).update({"is_valid": False}).eq("id", channel_row_id).execute()
 
+    async def set_webhook_url(self, channel_row_id: str, webhook_url: Optional[str]) -> None:
+        """Persists the per-channel webhook NotificationSender sends
+        through, so it's created once (lazily, on first notification) and
+        reused after that instead of piling up a new webhook per message.
+        Also used to clear it (webhook_url=None) when Discord reports the
+        webhook itself no longer exists, so the next send recreates one."""
+        await (
+            self._db.client.table(_CHANNELS_TABLE).update({"webhook_url": webhook_url}).eq("id", channel_row_id).execute()
+        )
+
     async def link_account(self, guild_id: int, account_id: str, channel_row_id: str) -> None:
         try:
             await (
