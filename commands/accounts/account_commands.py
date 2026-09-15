@@ -151,6 +151,10 @@ async def account_add(
         interaction.guild.id, channel.id, name=channel.name
     )
     await bot.channels_repo.link_account(interaction.guild.id, account_row["id"], channel_row["id"])  # type: ignore[attr-defined]
+    # Created here rather than waiting for the first notification, so the
+    # admin can rename it / give it a custom avatar in Discord's own
+    # channel-integrations UI before any alert ever goes out through it.
+    await bot.notification_sender.get_or_create_webhook(channel_row, channel)  # type: ignore[attr-defined]
 
     event_types = event_types_for_capabilities(adapter.capabilities)
     await bot.alert_configs_repo.seed_defaults(  # type: ignore[attr-defined]

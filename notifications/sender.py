@@ -154,7 +154,7 @@ class NotificationSender:
                 logger.exception("Failed to look up notification channel %s.", discord_channel_id)
                 return
 
-        webhook = await self._get_or_create_webhook(channel_row, discord_channel)
+        webhook = await self.get_or_create_webhook(channel_row, discord_channel)
         if webhook is not None:
             try:
                 await webhook.send(
@@ -185,9 +185,14 @@ class NotificationSender:
         except discord.HTTPException:
             logger.exception("Failed to send notification to channel %s.", discord_channel_id)
 
-    async def _get_or_create_webhook(
+    async def get_or_create_webhook(
         self, channel_row: Dict[str, Any], discord_channel: Any
     ) -> Optional[discord.Webhook]:
+        """Public (not just an internal `_send_to_channel()` helper) since
+        `/pulsenotify account-add` also calls this proactively — right when
+        a channel is first linked, rather than waiting for the first
+        notification — so the admin can go rename/re-avatar the webhook in
+        Discord's own UI before any alert ever uses it."""
         webhook_url = channel_row.get("webhook_url")
         if webhook_url:
             return self._webhook_from_url(webhook_url, client=self._bot)

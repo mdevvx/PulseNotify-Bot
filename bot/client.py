@@ -106,8 +106,8 @@ class PulseNotifyBot(commands.Bot):
         self.channels_repo = NotificationChannelRepository(self.database)
         self.alert_configs_repo = AlertConfigurationRepository(self.database)
 
-        notification_sender = NotificationSender(self, self.alert_configs_repo, self.channels_repo)
-        self.monitoring = MonitoringManager(self.database, settings, notification_sink=notification_sender.handle)
+        self.notification_sender = NotificationSender(self, self.alert_configs_repo, self.channels_repo)
+        self.monitoring = MonitoringManager(self.database, settings, notification_sink=self.notification_sender.handle)
         self.started_at: Optional[datetime.datetime] = None
 
         register_events(self)
