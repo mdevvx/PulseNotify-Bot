@@ -187,3 +187,25 @@ async def test_live_search_is_skipped_once_the_daily_budget_is_exhausted() -> No
 
     assert third is None  # skipped, not an error
     assert client.search_live_calls == 2
+
+
+def test_min_poll_interval_spreads_the_live_search_budget_across_the_day() -> None:
+    """Regression test: MonitoringManager used to schedule any LIVE_STATUS
+    adapter at a flat 60s cadence. For YouTube that burned the whole day's
+    100-unit-per-call search budget in the first few minutes (8000/100 = 80
+    calls at one every 60s is spent inside 80 minutes), then went dark for
+    the rest of the day instead of spreading checks out — see
+    platforms/base.py's min_poll_interval_seconds docstring. 8000 units /
+    100 per call = 80 calls/day = one every 1080s."""
+    client = FakeYouTubeClient()
+    adapter = _make_adapter(client)
+
+    assert adapter.min_poll_interval_seconds == 1080.0
+
+
+def test_min_poll_interval_follows_a_smaller_configured_budget() -> None:
+    client = FakeYouTubeClient()
+    adapter = _make_adapter(client, live_search_daily_budget_units=200)
+
+    # 200 / 100 = 2 calls/day = one every 43200s.
+    assert adapter.min_poll_interval_seconds == 43200.0

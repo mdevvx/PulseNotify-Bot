@@ -60,6 +60,15 @@ class YouTubeAdapter(PlatformAdapter):
         self._search_budget = RateLimiter(
             max_requests=max(live_search_daily_budget_units, _SEARCH_COST), period_seconds=86400
         )
+        # Without this, MonitoringManager would schedule this adapter at
+        # its generic 60s LIVE_STATUS interval, which would burn the whole
+        # day's search budget in the first few minutes (e.g. 8000/100 = 80
+        # calls at one every 60s is spent inside 80 minutes) and then go
+        # dark for the rest of the day instead of spreading checks evenly —
+        # see platforms/base.py's docstring. Spacing polls one call apart
+        # keeps the sliding-window budget spent at a sustainable rate.
+        search_calls_per_day = max(live_search_daily_budget_units // _SEARCH_COST, 1)
+        self.min_poll_interval_seconds = 86400 / search_calls_per_day
         # A channel's uploads-playlist ID never changes once known, so
         # caching it avoids spending a channels.list call re-fetching it
         # on every single content poll.

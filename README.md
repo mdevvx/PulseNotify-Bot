@@ -259,6 +259,8 @@ Credentials: a plain API key, no OAuth (everything above is public data).
 
 If you later get a Google quota extension, raise `YOUTUBE_DAILY_QUOTA_UNITS` accordingly — you cannot pay to increase it directly.
 
+**Scheduler cadence fix (2026-09-16):** `MonitoringManager` picks one poll interval per platform based only on whether it supports `Capability.LIVE_STATUS` — 60s (`MONITORING_LIVE_POLL_INTERVAL_SECONDS`) for any such adapter, since that's fine for Twitch/Kick's cheap live checks. YouTube also has `LIVE_STATUS`, so it was getting scheduled every 60s too — but its search budget (80 calls/day at the defaults above) was designed to be spread roughly once every 18 minutes, not burned in the first 80 minutes after every restart and then gone dark for the rest of the day. `PlatformAdapter` now has an optional `min_poll_interval_seconds` an adapter can set to floor its own scheduler cadence; `YouTubeAdapter` computes it from `YOUTUBE_LIVE_SEARCH_DAILY_BUDGET_UNITS` (86400s / (budget / 100 units per call)), so it stays correct if that setting is ever tuned. This also slows down new-video polling to the same ~18-minute cadence (both content and live checks share one scheduler tick per account) — an acceptable tradeoff since new-video alerts were never latency-sensitive to the minute.
+
 ## Twitch adapter (platforms/twitch/)
 
 Live/offline detection only (`Capability.LIVE_STATUS`) — see `platforms/twitch/adapter.py`'s module docstring for the full research writeup. Summary:

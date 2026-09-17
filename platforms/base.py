@@ -117,6 +117,17 @@ class PlatformAdapter(abc.ABC):
     platform: ClassVar[str]
     capabilities: ClassVar[FrozenSet[Capability]]
 
+    # Floor on the scheduler's poll interval for this adapter, in seconds.
+    # None (the default) means MonitoringManager's generic per-capability
+    # interval from Settings applies unmodified — fine for a platform whose
+    # LIVE_STATUS check is cheap (Twitch, Kick). An adapter whose live check
+    # is quota-limited relative to how often the generic interval would
+    # call it (e.g. YouTube's 100-unit search.list) must set this in its
+    # own __init__ to whatever cadence its budget can actually sustain, or
+    # the scheduler will burn the whole budget in the first few minutes of
+    # each day instead of spreading it out.
+    min_poll_interval_seconds: Optional[float] = None
+
     def supports(self, capability: Capability) -> bool:
         return capability in self.capabilities
 
