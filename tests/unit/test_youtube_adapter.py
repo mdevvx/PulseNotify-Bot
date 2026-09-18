@@ -178,15 +178,71 @@ async def test_live_search_returns_live_status_for_an_active_broadcast() -> None
 
 async def test_live_search_is_skipped_once_the_daily_budget_is_exhausted() -> None:
     # 200 units of budget = exactly 2 search.list calls (100 units each).
+    # Three *distinct* channels on purpose: the per-channel cache below
+    # would otherwise dedupe repeated calls for the same one, masking
+    # actual budget exhaustion (see test_repeated_calls_for_the_same_channel_are_cached).
     client = FakeYouTubeClient()
     adapter = _make_adapter(client, live_search_daily_budget_units=200)
+    account_a = AccountRef(platform="youtube", platform_account_id="UCaaa", username="a")
+    account_b = AccountRef(platform="youtube", platform_account_id="UCbbb", username="b")
+    account_c = AccountRef(platform="youtube", platform_account_id="UCccc", username="c")
 
-    await adapter.get_live_status(_ACCOUNT)
-    await adapter.get_live_status(_ACCOUNT)
-    third = await adapter.get_live_status(_ACCOUNT)
+    await adapter.get_live_status(account_a)
+    await adapter.get_live_status(account_b)
+    third = await adapter.get_live_status(account_c)
 
     assert third is None  # skipped, not an error
     assert client.search_live_calls == 2
+
+
+async def test_repeated_calls_for_the_same_channel_are_cached() -> None:
+    """Regression test: two guilds monitoring the same creator each get
+    their own AccountRef with the same platform_account_id — without
+    caching, each would pay the full 100-unit search cost for what is
+    really one physical channel check, silently doubling (or Nx-ing) real
+    cost against the shared daily budget."""
+    client = FakeYouTubeClient()
+    fake_clock = [1000.0]
+    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
+
+    first = await adapter.get_live_status(_ACCOUNT)
+    fake_clock[0] += 5  # far less than min_poll_interval_seconds
+    second = await adapter.get_live_status(_ACCOUNT)
+
+    assert client.search_live_calls == 1
+    assert second == first
+
+
+async def test_cache_expires_after_the_interval_for_the_current_channel_count() -> None:
+    client = FakeYouTubeClient()
+    fake_clock = [1000.0]
+    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
+
+    await adapter.get_live_status(_ACCOUNT)
+    fake_clock[0] += adapter.min_poll_interval_seconds + 1
+    await adapter.get_live_status(_ACCOUNT)
+
+    assert client.search_live_calls == 2
+
+
+async def test_cache_window_scales_up_with_the_number_of_distinct_channels() -> None:
+    """A second, different channel sharing this adapter's budget means
+    each individual channel must wait twice as long between real checks to
+    keep total daily usage within the same shared budget."""
+    client = FakeYouTubeClient()
+    fake_clock = [1000.0]
+    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
+    other_account = AccountRef(platform="youtube", platform_account_id="UCother", username="other")
+
+    await adapter.get_live_status(_ACCOUNT)
+    await adapter.get_live_status(other_account)  # now 2 known channels
+
+    base_interval = adapter.min_poll_interval_seconds
+    fake_clock[0] += base_interval + 1  # would have expired for 1 known channel
+    still_cached = await adapter.get_live_status(_ACCOUNT)
+
+    assert client.search_live_calls == 2  # the re-check was served from cache, not a 3rd call
+    assert still_cached is not None
 
 
 def test_min_poll_interval_spreads_the_live_search_budget_across_the_day() -> None:

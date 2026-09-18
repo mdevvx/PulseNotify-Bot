@@ -26,7 +26,8 @@ same pool as the 1-unit calls — see the two RateLimiter instances below.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, FrozenSet, Optional
+import time
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, Optional, Set, Tuple
 
 from events.models import NormalizedEvent
 from monitoring.rate_limiter import RateLimiter
@@ -49,8 +50,16 @@ class YouTubeAdapter(PlatformAdapter):
         {Capability.VIDEOS, Capability.SHORTS, Capability.LIVE_STATUS}
     )
 
-    def __init__(self, client: YouTubeClient, *, daily_quota_units: int, live_search_daily_budget_units: int) -> None:
+    def __init__(
+        self,
+        client: YouTubeClient,
+        *,
+        daily_quota_units: int,
+        live_search_daily_budget_units: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._client = client
+        self._clock = clock
         list_budget = max(daily_quota_units - live_search_daily_budget_units, _LIST_COST)
         self._list_budget = RateLimiter(max_requests=list_budget, period_seconds=86400)
         # Budgeted in quota units (not call count) to match how it's
@@ -67,8 +76,26 @@ class YouTubeAdapter(PlatformAdapter):
         # dark for the rest of the day instead of spreading checks evenly —
         # see platforms/base.py's docstring. Spacing polls one call apart
         # keeps the sliding-window budget spent at a sustainable rate.
-        search_calls_per_day = max(live_search_daily_budget_units // _SEARCH_COST, 1)
-        self.min_poll_interval_seconds = 86400 / search_calls_per_day
+        self._search_calls_per_day = max(live_search_daily_budget_units // _SEARCH_COST, 1)
+        self.min_poll_interval_seconds = 86400 / self._search_calls_per_day
+        # Live-status results are cached per *physical* channel
+        # (platform_account_id), not per guild-scoped account row, and the
+        # cache window grows with the number of distinct channels seen so
+        # far. Two reasons this matters, both found in production: (1) two
+        # guilds monitoring the same creator would otherwise each pay the
+        # full 100-unit search cost for that one channel on every scheduler
+        # tick, silently doubling the real cost min_poll_interval_seconds
+        # above was sized for; (2) more generally, N distinct channels
+        # sharing this one adapter's search budget need N times as long
+        # between checks on any one of them to stay within the same daily
+        # budget — otherwise the budget exhausts partway through the day
+        # and every channel goes dark until the sliding window frees up.
+        # Growing (never shrinking) the known-channel count is a
+        # deliberately conservative approximation: an account removed
+        # later still counts until restart, which only makes checks
+        # somewhat slower than the theoretical minimum, never over budget.
+        self._live_status_cache: Dict[str, Tuple[float, Optional[LiveStatus]]] = {}
+        self._known_channel_ids: Set[str] = set()
         # A channel's uploads-playlist ID never changes once known, so
         # caching it avoids spending a channels.list call re-fetching it
         # on every single content poll.
@@ -125,23 +152,37 @@ class YouTubeAdapter(PlatformAdapter):
         return FetchResult(items=videos, next_cursor=newest_video_id)
 
     async def get_live_status(self, account: AccountRef) -> Optional[LiveStatus]:
+        channel_id = account.platform_account_id
+        self._known_channel_ids.add(channel_id)
+        cache_ttl = self.min_poll_interval_seconds * len(self._known_channel_ids)
+
+        cached = self._live_status_cache.get(channel_id)
+        if cached is not None:
+            cached_at, cached_status = cached
+            if self._clock() - cached_at < cache_ttl:
+                return cached_status
+
         if not await self._search_budget.try_acquire(cost=_SEARCH_COST):
             logger.debug(
                 "Skipping YouTube live check for %s — daily live-search budget exhausted.", account.username
             )
             return None
 
-        live_results = await self._client.search_live(account.platform_account_id)
+        live_results = await self._client.search_live(channel_id)
         if not live_results:
-            return LiveStatus(is_live=False)
+            return self._cache_live_status(channel_id, LiveStatus(is_live=False))
 
         video_id = live_results[0]["id"]["videoId"]
         await self._list_budget.acquire(cost=_LIST_COST)
         videos = await self._client.get_videos([video_id])
         if not videos:
-            return LiveStatus(is_live=False)
+            return self._cache_live_status(channel_id, LiveStatus(is_live=False))
 
-        return parser.video_to_live_status(videos[0])
+        return self._cache_live_status(channel_id, parser.video_to_live_status(videos[0]))
+
+    def _cache_live_status(self, channel_id: str, status: LiveStatus) -> LiveStatus:
+        self._live_status_cache[channel_id] = (self._clock(), status)
+        return status
 
     def normalize_event(self, account: AccountRef, raw_item: Any) -> NormalizedEvent:
         return parser.normalize_video(account, raw_item)

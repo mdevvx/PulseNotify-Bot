@@ -158,14 +158,20 @@ def harness() -> Harness:
     return Harness()
 
 
-async def test_sends_an_embed_when_no_config_exists_yet(harness: Harness) -> None:
+async def test_sends_plain_text_with_link_preview_allowed_when_no_config_exists_yet(harness: Harness) -> None:
+    """No manually-built embed by default — content carries the raw link so
+    Discord's own link-unfurling renders a richer, platform-branded preview
+    than a hand-built embed would (see notifications/embeds.py)."""
     channel = await harness.add_channel(1, "acc-1", 555)
 
     await harness.sender.handle(_event())
 
     assert len(channel.sent) == 1
-    assert channel.sent[0]["embed"] is not None
-    assert channel.sent[0]["content"] is None
+    sent = channel.sent[0]
+    assert sent["embed"] is None
+    assert "A video" in sent["content"]
+    assert "https://youtube.com/watch?v=vid-1" in sent["content"]
+    assert sent["suppress_embeds"] is False  # embed_enabled=True -> allow the native preview
 
 
 async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
@@ -179,15 +185,17 @@ async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
     assert channel.sent == []
 
 
-async def test_embed_disabled_sends_plain_text_instead(harness: Harness) -> None:
+async def test_embed_disabled_suppresses_the_native_link_preview(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
 
     await harness.sender.handle(_event())
 
-    assert channel.sent[0]["embed"] is None
-    assert "A video" in channel.sent[0]["content"]
+    sent = channel.sent[0]
+    assert sent["embed"] is None
+    assert "A video" in sent["content"]
+    assert sent["suppress_embeds"] is True
 
 
 async def test_mention_role_is_included_and_scoped_to_that_role_only(harness: Harness) -> None:
@@ -394,12 +402,16 @@ async def test_second_notification_reuses_the_persisted_webhook(harness: Harness
     assert len(channel.sent) == 2
 
 
-async def test_webhook_send_uses_the_account_username(harness: Harness) -> None:
+async def test_webhook_send_never_overrides_the_webhooks_own_name_or_avatar(harness: Harness) -> None:
+    """Regression test: sending used to pass username=account_username on
+    every webhook.send() call, which silently stomped any name/avatar an
+    admin had customized on the webhook itself in Discord's own UI (e.g. to
+    match their server's branding) back to the raw platform account name."""
     channel = await harness.add_channel(1, "acc-1", 555)
 
     await harness.sender.handle(_event(account_username="SomeCreator"))
 
-    assert channel.sent[0]["username"] == "SomeCreator"
+    assert channel.sent[0]["username"] is None
 
 
 async def test_missing_manage_webhooks_permission_falls_back_to_sending_as_the_bot(harness: Harness) -> None:

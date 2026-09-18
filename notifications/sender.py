@@ -4,15 +4,19 @@ about an event and how, then sends it — respecting AllowedMentions
 Discord says it's gone (section 23).
 
 Alerts are sent through a per-channel Discord webhook rather than the bot
-posting as itself, so each notification's sender name reflects the
-posting account (e.g. "@vectorgames_") instead of always showing up as
-the bot. The webhook is created once per channel (lazily, on the first
-notification sent there) and its URL is persisted on the channel row
-(migration 0004) so it's reused after that instead of accumulating a new
-webhook per message. If the bot lacks "Manage Webhooks" in a channel, or
-webhook delivery fails for any reason, this falls back to sending as the
-bot itself rather than dropping the notification — a missing permission
-in one channel must not silently swallow alerts.
+posting as itself. The webhook is created once per channel (lazily, on the
+first notification sent there, named after this bot by default) and its
+URL is persisted on the channel row (migration 0004) so it's reused after
+that instead of accumulating a new webhook per message. Deliberately never
+overridden with a per-message `username`/`avatar_url` after that: an admin
+can rename it and give it a custom avatar in Discord's own channel
+integration settings (e.g. to match their server's branding), and every
+future notification must keep respecting that instead of stomping it back
+to whatever the raw platform account's name is on every send. If the bot
+lacks "Manage Webhooks" in a channel, or webhook delivery fails for any
+reason, this falls back to sending as the bot itself rather than dropping
+the notification — a missing permission in one channel must not silently
+swallow alerts.
 
 Discord-side rate limiting is handled by discord.py's own HTTP layer;
 EventProcessor's single-consumer queue already serializes delivery (one
@@ -31,7 +35,7 @@ from config import constants
 from database.repositories.alert_configs import AlertConfigurationRepository
 from database.repositories.channels import NotificationChannelRepository
 from events.models import NormalizedEvent
-from notifications.embeds import build_embed, build_plain_text
+from notifications.embeds import build_plain_text
 from notifications.templates import render_custom_message
 from utils.logger import get_logger
 
@@ -89,7 +93,6 @@ class NotificationSender:
                 embed=embed,
                 allowed_mentions=allowed_mentions,
                 suppress_embeds=suppress_embeds,
-                webhook_username=event.account_username,
             )
 
     def _build_message(
@@ -110,14 +113,17 @@ class NotificationSender:
             content = render_custom_message(custom_message, event, mention_role_id=mention_role_id)
             return content, None, not embed_enabled
 
+        # Same reasoning as the custom-message branch above: never build our
+        # own embed here either. A hand-built embed looks noticeably worse
+        # than the rich, platform-branded preview Discord generates on its
+        # own from the raw link (e.g. YouTube's real title/description/
+        # thumbnail with its own "YouTube" footer) — so always send plain
+        # text containing the link and let that native preview do the work.
+        # embed_enabled controls whether it's allowed to render at all.
         mention_text = f"<@&{mention_role_id}>" if mention_role_id else None
-
-        if embed_enabled:
-            return mention_text, build_embed(event), False
-
         fallback = build_plain_text(event)
         content = f"{mention_text}\n{fallback}" if mention_text else fallback
-        return content, None, False
+        return content, None, not embed_enabled
 
     def _allowed_mentions_for(self, content: Optional[str], mention_role_id: Optional[int]) -> discord.AllowedMentions:
         text = content or ""
@@ -139,7 +145,6 @@ class NotificationSender:
         embed: Optional[discord.Embed],
         allowed_mentions: discord.AllowedMentions,
         suppress_embeds: bool = False,
-        webhook_username: Optional[str] = None,
     ) -> None:
         discord_channel_id = channel_row["channel_id"]
         discord_channel = self._bot.get_channel(discord_channel_id)
@@ -157,12 +162,14 @@ class NotificationSender:
         webhook = await self.get_or_create_webhook(channel_row, discord_channel)
         if webhook is not None:
             try:
+                # No username/avatar_url override here on purpose — see this
+                # module's docstring for why: it would stomp any branding an
+                # admin has customized on this webhook in Discord's own UI.
                 await webhook.send(
                     content=content,
                     embed=embed,
                     allowed_mentions=allowed_mentions,
                     suppress_embeds=suppress_embeds,
-                    username=webhook_username or constants.BOT_NAME,
                 )
                 return
             except discord.NotFound:
